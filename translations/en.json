@@ -1,0 +1,40 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Milieu Labs AC – Login",
+        "description": "Enter your Milieu Labs account credentials.",
+        "data": {
+          "username": "Username (email)",
+          "password": "Password"
+        }
+      },
+      "select_shadow": {
+        "title": "Milieu Labs AC – Select Device",
+        "description": "Found {hub_count} hub(s) and {lvr_count} LVR(s). Select the devices to use.",
+        "data": {
+          "hub_shadow": "Hub device",
+          "lvr_shadow": "LVR device"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Milieu Labs AC – Re-authenticate",
+        "description": "Your session has expired. Please enter your Milieu Labs account credentials again.",
+        "data": {
+          "username": "Username (email)",
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Invalid username or password.",
+      "cannot_connect": "Unable to connect to Milieu Labs. Check your network and try again.",
+      "unknown": "An unexpected error occurred. Check the logs for details."
+    },
+    "abort": {
+      "already_configured": "This device is already configured.",
+      "no_devices": "No Milieu Labs devices were found on this account.",
+      "reauth_successful": "Re-authentication was successful."
+    }
+  }
+}
