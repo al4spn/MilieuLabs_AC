@@ -8,7 +8,7 @@
     "iot_class": "local_polling",
     "issue_tracker": "https://github.com/al4spn/MilieuLabs_AC/issues",
     "requirements": ["awsiotsdk>=1.21.0", "awscrt>=0.19.0"],
-    "version": "0.0.2",
+    "version": "1.0.0",
     "integration_type" : "hub",
     "loggers": ["custom_components.milieulabs_ac"]
 }
