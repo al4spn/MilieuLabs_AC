@@ -99,7 +99,7 @@ class MilieuACZoneClimate(CoordinatorEntity, ClimateEntity):
     _attr_target_temperature_step = 0.5
     _attr_min_temp = 16.0
     _attr_max_temp = 32.0
-    _attr_has_entity_name = False
+    _attr_has_entity_name = True
 
     def __init__(self, coordinator, zone_id: str) -> None:
         """Initialise the zone climate entity."""
@@ -285,7 +285,7 @@ class MilieuACMainClimate(CoordinatorEntity, ClimateEntity):
     _attr_target_temperature_step = 0.5
     _attr_min_temp = 16.0
     _attr_max_temp = 32.0
-    _attr_has_entity_name = False
+    _attr_has_entity_name = True
 
     def __init__(self, coordinator) -> None:
         """Initialise the main system climate entity."""
