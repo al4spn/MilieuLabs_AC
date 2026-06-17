@@ -29,9 +29,9 @@ A custom [Home Assistant](https://www.home-assistant.io/) integration for Milieu
 
 ### Manual
 
-1. Copy this repository into your Home Assistant `config/custom_components` directory as `milieulabs_test`:
+1. Copy this repository into your Home Assistant `config/custom_components` directory as `milieulabs_ac`:
    ```
-   config/custom_components/milieulabs_test/
+   config/custom_components/milieulabs_ac/
    ```
 2. Restart Home Assistant.
 3. Go to **Settings → Devices & Services → Add Integration**, search for **Milieu Labs AC**, and follow the setup wizard.
@@ -69,7 +69,7 @@ Zone entities are created dynamically the first time data for that zone is recei
 
 ## Troubleshooting
 
-- **Repeated login prompts**: ensure Home Assistant can reach the AWS Cognito and IoT endpoints listed above; check the Home Assistant logs for `custom_components.milieulabs_test` for Cognito error codes.
+- **Repeated login prompts**: ensure Home Assistant can reach the AWS Cognito and IoT endpoints listed above; check the Home Assistant logs for `custom_components.milieulabs_ac` for Cognito error codes.
 - **No entities created**: verify the selected hub/LVR shadow names are correct, and check logs for `Shadow GET rejected` errors.
 - **MQTT connection drops every ~24h**: this is expected behaviour for AWS IoT SigV4 WebSocket connections; the integration automatically refreshes credentials and reconnects.
 
@@ -79,7 +79,7 @@ Enable debug logging for more detail:
 logger:
   default: info
   logs:
-    custom_components.milieulabs_test: debug
+    custom_components.milieulabs_ac: debug
 ```
 
 ## Disclaimer

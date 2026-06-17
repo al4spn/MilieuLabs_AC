@@ -1,7 +1,7 @@
 """Constants for the Milieu Labs AC integration."""
 from datetime import timedelta
 
-DOMAIN = "milieulabs_test"
+DOMAIN = "milieulabs_ac"
 API_URL = "https://telemetry-api.milieulabs.com.au/"
 API_SystemID_URL = "https://69lfsbfsrb.execute-api.us-east-2.amazonaws.com/prod/all"
 API_PROPERTIES_URL = "https://telemetry-api.milieulabs.com.au/V1/properties"

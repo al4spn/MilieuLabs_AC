@@ -1,14 +1,14 @@
 {
-    "domain": "milieulabs_test",
-    "name": "MilieuLabs test",
+    "domain": "milieulabs_ac",
+    "name": "Milieu Labs AC",
     "codeowners": [ "@AL4SPN" ],
     "config_flow": true,
     "dependencies": [],
-    "documentation": "https://github.com/al4spn/ha-milieulabs_test",
+    "documentation": "https://github.com/al4spn/MilieuLabs_AC",
     "iot_class": "local_polling",
-    "issue_tracker": "https://github.com/al4spn/ha-milieulabs_test/issues",
+    "issue_tracker": "https://github.com/al4spn/MilieuLabs_AC/issues",
     "requirements": ["awsiotsdk>=1.21.0", "awscrt>=0.19.0"],
     "version": "0.0.2",
     "integration_type" : "hub",
-    "loggers": ["custom_components.milieulabs_test"]
+    "loggers": ["custom_components.milieulabs_ac"]
 }
