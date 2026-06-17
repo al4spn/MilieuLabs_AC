@@ -132,9 +132,14 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
             )
             auth_result = response["AuthenticationResult"]
             self.id_token = auth_result["IdToken"]
-            if "RefreshToken" in auth_result:
-                self.refresh_token = auth_result["RefreshToken"]
+            new_refresh_token = auth_result.get("RefreshToken")
+            refresh_token_rotated = (
+                new_refresh_token is not None and new_refresh_token != self.refresh_token
+            )
+            if refresh_token_rotated:
+                self.refresh_token = new_refresh_token
             _LOGGER.debug("Cognito id_token refreshed successfully")
+            self._persist_tokens(refresh_token_rotated)
         except ClientError as err:
             error_code = err.response.get("Error", {}).get("Code", "")
             if error_code == "NotAuthorizedException":
@@ -144,6 +149,25 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
                 raise _TokenExpiredError from err
             _LOGGER.error("Failed to refresh Cognito id_token: %s", err)
             raise
+
+    def _persist_tokens(self, refresh_token_rotated: bool) -> None:
+        """Save the current id_token (and refresh_token if rotated) to the config entry.
+
+        Called from the executor thread after a Cognito refresh, so the tokens
+        survive integration reloads / HA restarts instead of only living on
+        this coordinator instance.
+        """
+        if self.config_entry is None:
+            return
+
+        new_data = {**self.config_entry.data, "id_token": self.id_token}
+        if refresh_token_rotated:
+            new_data["refresh_token"] = self.refresh_token
+
+        def _update_entry() -> None:
+            self.hass.config_entries.async_update_entry(self.config_entry, data=new_data)
+
+        self.hass.loop.call_soon_threadsafe(_update_entry)
 
     def _setup_mqtt_sync(self) -> None:
         """Synchronous MQTT / shadow setup – runs in HA executor thread."""
