@@ -52,6 +52,7 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
         self.capabilities_data: dict = {}        # Hub shadow sensor readings (BME280, iAQ etc.)
         self.hub_shadow_data: dict = {}        # Callback set by climate platform to add new zone climate entities
         self._async_add_zone_climate_entities = None
+        self._async_add_zone_number_entities = None
         self._known_zone_ids: set = set()
         # MQTT internals
         self._mqtt_connection = None
@@ -686,6 +687,26 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
             _LOGGER.debug(
                 "Climate callback not registered yet for zone(s) %s – "
                 "entities will be created when climate platform sets up",
+                new_zone_ids,
+            )
+
+        if new_zone_ids and self._async_add_zone_number_entities is not None:
+            from .number import MilieuACZoneSetpoint, SETPOINT_CONFIGS
+            new_number_entities = [
+                MilieuACZoneSetpoint(self, zone_id, key)
+                for zone_id in new_zone_ids
+                for key in SETPOINT_CONFIGS
+            ]
+            self._async_add_zone_number_entities(new_number_entities, True)
+            _LOGGER.info(
+                "Registered %d new zone setpoint number entity(ies) for zone(s): %s",
+                len(new_number_entities),
+                new_zone_ids,
+            )
+        elif new_zone_ids and self._async_add_zone_number_entities is None:
+            _LOGGER.debug(
+                "Number callback not registered yet for zone(s) %s – "
+                "entities will be created when number platform sets up",
                 new_zone_ids,
             )
 
