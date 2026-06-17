@@ -35,7 +35,7 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
     lvr_shadow_name = config_entry.data.get("lvr_shadow_name")
 
     # Validate required data
-    if not all([id_token, refresh_token, hub_shadow_name]):
+    if not all([id_token, refresh_token, hub_shadow_name, lvr_shadow_name]):
         _LOGGER.error("Missing required configuration data")
         return False
 
