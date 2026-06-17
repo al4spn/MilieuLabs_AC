@@ -29,7 +29,7 @@ A custom [Home Assistant](https://www.home-assistant.io/) integration for Milieu
 
 ### Manual
 
-1. Copy this repository into your Home Assistant `config/custom_components` directory as `milieulabs_ac`:
+1. Copy the `custom_components/milieulabs_ac` folder from this repository into your Home Assistant `config/custom_components` directory, so you end up with:
    ```
    config/custom_components/milieulabs_ac/
    ```
