@@ -48,6 +48,7 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
             id_token=id_token,
             refresh_token=refresh_token,
         )
+        coordinator.config_entry = config_entry
 
         # Fetch initial data
         await coordinator.async_config_entry_first_refresh()
