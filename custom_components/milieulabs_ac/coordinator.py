@@ -191,6 +191,7 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
             client_id=f"ha-milieulabs-{_uuid.uuid4()}",
             on_connection_interrupted=self._on_connection_interrupted,
             on_connection_resumed=self._on_connection_resumed,
+            keep_alive_secs=30,
         )
 
         connect_future = self._mqtt_connection.connect()
