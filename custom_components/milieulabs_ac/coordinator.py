@@ -324,7 +324,13 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
         )
 
     async def _async_reconnect_mqtt(self) -> None:
-        """Wait briefly, then re-establish MQTT with freshly refreshed credentials."""
+        """Wait briefly, then re-establish MQTT with freshly refreshed credentials.
+
+        If the lightweight reconnect fails for any reason other than an expired
+        Cognito token, fall back to a full integration reload so the entry is
+        torn down and re-initialised cleanly (equivalent to the manual reload
+        that resolves persistent MQTT_TIMEOUT drops).
+        """
         import asyncio as _asyncio
         _LOGGER.info("Waiting 5 s before MQTT reconnect...")
         await _asyncio.sleep(5)
@@ -338,7 +344,11 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
             if self.config_entry is not None:
                 self.config_entry.async_start_reauth(self.hass)
         except Exception as err:
-            _LOGGER.error("MQTT reconnect failed: %s", err, exc_info=True)
+            _LOGGER.error(
+                "MQTT reconnect failed (%s) – scheduling full integration reload", err
+            )
+            if self.config_entry is not None:
+                self.hass.config_entries.async_schedule_reload(self.config_entry.entry_id)
 
     # Shadow callbacks (called from MQTT thread)
 
