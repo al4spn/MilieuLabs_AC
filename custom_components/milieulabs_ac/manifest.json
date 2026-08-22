@@ -5,7 +5,7 @@
     "config_flow": true,
     "dependencies": [],
     "documentation": "https://github.com/al4spn/MilieuLabs_AC",
-    "iot_class": "local_polling",
+    "iot_class": "cloud_push",
     "issue_tracker": "https://github.com/al4spn/MilieuLabs_AC/issues",
     "requirements": ["awsiotsdk>=1.21.0", "awscrt>=0.19.0"],
     "version": "1.0.0",

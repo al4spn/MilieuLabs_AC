@@ -80,7 +80,10 @@ class MilieuACZoneSetpoint(CoordinatorEntity, NumberEntity):
         self._attr_native_step = cfg["step"]
         self._attr_icon = cfg["icon"]
         self._attr_unique_id = str(
-            uuid.uuid5(uuid.NAMESPACE_DNS, f"{DOMAIN}_{zone_id}_{key}")
+            uuid.uuid5(
+                uuid.NAMESPACE_DNS,
+                f"{DOMAIN}_{coordinator.lvr_shadow_name}_{zone_id}_{key}",
+            )
         )
 
     # ------------------------------------------------------------------

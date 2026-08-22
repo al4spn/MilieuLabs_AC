@@ -50,7 +50,10 @@ class MilieuACHubSensorBase(CoordinatorEntity, SensorEntity):
         super().__init__(coordinator, context=f"hub_{hub_key}")
         self._hub_key = hub_key
         self._attr_unique_id = str(
-            uuid.uuid5(uuid.NAMESPACE_DNS, f"{DOMAIN}_hub_{hub_key}")
+            uuid.uuid5(
+                uuid.NAMESPACE_DNS,
+                f"{DOMAIN}_{coordinator.hub_shadow_name}_hub_{hub_key}",
+            )
         )
         self._attr_name = name
         self._attr_device_info = DeviceInfo(
