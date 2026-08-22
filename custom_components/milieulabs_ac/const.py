@@ -11,6 +11,11 @@ API_PROPERTIES_URL = "https://telemetry-api.milieulabs.com.au/V1/properties"
 ClientId = "2radg6bqpp45h9gm2t360fh60h"
 PoolId = "us-east-1_oOThwaWze"
 
+# A hub that dies keeps serving its retained shadow indefinitely, so treat
+# readings older than this as unavailable rather than current. See
+# MilieulabsacCoordinator.hub_fresh for how the figure was chosen.
+HUB_STALE_AFTER_S = 6 * 60 * 60
+
 # Update intervals
 SCAN_INTERVAL = timedelta(minutes=5)  # Changed from 1 hour to 5 minutes
 DEFAULT_TIMEOUT = 10

@@ -1,6 +1,7 @@
 """Coordinator for Milieu Labs AC integration."""
 import logging
 import asyncio
+import time
 import boto3
 import uuid as _uuid
 from datetime import datetime, timedelta
@@ -13,6 +14,8 @@ class _TokenExpiredError(Exception):
 from homeassistant.core import HomeAssistant
 from .const import (
     DOMAIN,
+    HUB_STALE_AFTER_S,
+    SCAN_INTERVAL,
     ClientId,
     MQTT_ENDPOINT, AWS_REGION, COGNITO_IDENTITY_POOL_ID, COGNITO_IDP,
 )
@@ -37,6 +40,11 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
             hass,
             _LOGGER,
             name=DOMAIN,
+            # State arrives by MQTT push, so this fetches nothing -- it exists
+            # so entities re-evaluate availability on a timer. Without it a hub
+            # that goes silent mid-run keeps its last value on display forever,
+            # because nothing would ever ask the entity to render again.
+            update_interval=SCAN_INTERVAL,
         )
         self.hub_shadow_name = hub_shadow_name
         self.lvr_shadow_name = lvr_shadow_name
@@ -57,7 +65,12 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
         self.capabilities_data: dict = {}        # Hub shadow sensor readings (BME280, iAQ etc.)
         self.hub_shadow_data: dict = {}
         # Last full LVR reported state, kept for values with no dedicated store
-        self.lvr_reported: dict = {}        # Callback set by climate platform to add new zone climate entities
+        self.lvr_reported: dict = {}
+        # Newest shadow-metadata timestamp seen on the hub shadow (epoch sec).
+        # This is the device's own write time, NOT our receipt time -- a shadow
+        # GET of a long-dead hub returns instantly with ancient content, so
+        # stamping on arrival would make stale data look fresh.
+        self.hub_last_written: float | None = None        # Callback set by climate platform to add new zone climate entities
         self._async_add_zone_climate_entities = None
         self._async_add_zone_number_entities = None
         self._known_zone_ids: set = set()
@@ -70,6 +83,26 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
     async def _async_update_data(self) -> dict:
         """No polling – all data arrives via MQTT shadow callbacks."""
         return {}
+
+    @property
+    def hub_fresh(self) -> bool:
+        """Whether the hub shadow has been written recently enough to trust.
+
+        The hub keeps serving its last shadow forever after it dies, with no
+        error and no availability flag -- ``Status.isOnline`` is itself part of
+        that retained document and stays ``true``. One hub here was serving
+        readings 80 days old, and the only reason it was caught is that its
+        barometric pressure sat 19 hPa below every other room in the house.
+
+        Six hours: healthy hubs report on change, not on a schedule, and were
+        observed between 17 minutes and 2h47m apart, so this leaves headroom
+        over the slowest normal case without letting a dead hub masquerade
+        for long. Unknown timestamps are treated as fresh rather than hiding
+        data we simply cannot date.
+        """
+        if self.hub_last_written is None:
+            return True
+        return (time.time() - self.hub_last_written) < HUB_STALE_AFTER_S
 
     @property
     def lvr_online(self) -> bool:
@@ -476,11 +509,39 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
 
     # Hub shadow callbacks
 
+    @staticmethod
+    def _newest_metadata_timestamp(metadata) -> float | None:
+        """Deepest-nested newest ``timestamp`` in a shadow metadata tree."""
+        newest: float | None = None
+
+        def walk(node) -> None:
+            nonlocal newest
+            if isinstance(node, dict):
+                ts = node.get("timestamp")
+                if isinstance(ts, (int, float)) and (newest is None or ts > newest):
+                    newest = float(ts)
+                for value in node.values():
+                    walk(value)
+
+        walk(metadata)
+        return newest
+
+    def _record_hub_write_time(self, response) -> None:
+        """Track when the hub itself last wrote, from the shadow metadata."""
+        metadata = getattr(response, "metadata", None)
+        reported_meta = getattr(metadata, "reported", None) if metadata else None
+        if not reported_meta:
+            return
+        newest = self._newest_metadata_timestamp(reported_meta)
+        if newest is not None:
+            self.hub_last_written = newest
+
     def _on_hub_shadow_response(self, response) -> None:
         """Handle GetShadow accepted for the hub shadow."""
         try:
             if response is None or response.state is None:
                 return
+            self._record_hub_write_time(response)
             reported = response.state.reported or {}
             _LOGGER.debug("Hub shadow GET reported keys: %s", list(reported.keys()))
             self._process_hub_state(reported)
@@ -492,6 +553,7 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
         try:
             if response is None or response.state is None:
                 return
+            self._record_hub_write_time(response)
             reported = response.state.reported
             if not reported:
                 return

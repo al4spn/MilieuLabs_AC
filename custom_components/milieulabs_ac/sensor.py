@@ -75,7 +75,10 @@ class MilieuACHubSensorBase(CoordinatorEntity, SensorEntity):
 
     @property
     def available(self) -> bool:
-        return self._hub_key in self.coordinator.hub_shadow_data
+        return (
+            self._hub_key in self.coordinator.hub_shadow_data
+            and self.coordinator.hub_fresh
+        )
 
     @property
     def extra_state_attributes(self) -> dict:
