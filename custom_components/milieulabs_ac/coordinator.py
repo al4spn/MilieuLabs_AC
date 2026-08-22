@@ -15,6 +15,7 @@ from homeassistant.core import HomeAssistant
 from .const import (
     DOMAIN,
     HUB_STALE_AFTER_S,
+    HUB_SENSOR_BLOCKS,
     SCAN_INTERVAL,
     ClientId,
     MQTT_ENDPOINT, AWS_REGION, COGNITO_IDENTITY_POOL_ID, COGNITO_IDP,
@@ -532,7 +533,11 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
         reported_meta = getattr(metadata, "reported", None) if metadata else None
         if not reported_meta:
             return
-        newest = self._newest_metadata_timestamp(reported_meta)
+        newest = None
+        for block in HUB_SENSOR_BLOCKS:
+            ts = self._newest_metadata_timestamp(reported_meta.get(block))
+            if ts is not None and (newest is None or ts > newest):
+                newest = ts
         if newest is not None:
             self.hub_last_written = newest
 
