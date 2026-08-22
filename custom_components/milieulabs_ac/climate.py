@@ -160,7 +160,10 @@ class MilieuACZoneClimate(CoordinatorEntity, ClimateEntity):
 
     @property
     def available(self) -> bool:
-        return self._zone_id in self.coordinator.zone_data
+        return (
+            self._zone_id in self.coordinator.zone_data
+            and self.coordinator.lvr_online
+        )
 
     @property
     def current_temperature(self) -> float | None:
@@ -349,8 +352,10 @@ class MilieuACMainClimate(CoordinatorEntity, ClimateEntity):
 
     @property
     def available(self) -> bool:
-        # Available as soon as we have any user_data from the shadow
-        return bool(self.coordinator.user_data)
+        # Available once the shadow has given us user_data, and only while
+        # the LVR is actually reporting -- otherwise a dead in-wall unit
+        # keeps publishing its last temperature as though it were current.
+        return bool(self.coordinator.user_data) and self.coordinator.lvr_online
 
     @property
     def current_temperature(self) -> float | None:

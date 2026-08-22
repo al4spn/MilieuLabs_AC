@@ -72,6 +72,20 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
         return {}
 
     @property
+    def lvr_online(self) -> bool:
+        """Whether the in-wall LVR is still reporting.
+
+        The hub (dockable Wi-Fi head) and the LVR (in-wall base) fail
+        independently. A hub can stay online and keep serving its last shadow
+        while its LVR is dead, so the shadow answers with plausible values
+        that are actually frozen -- indistinguishable from live ones.
+
+        ``lastSeenUTC_s`` cannot be used to detect this: healthy units report
+        epoch or months-old timestamps for it. ``online`` is the reliable flag.
+        """
+        return self.lvr_reported.get("online") is not False
+
+    @property
     def room_temperature(self) -> float | None:
         """Current room temperature.
 
