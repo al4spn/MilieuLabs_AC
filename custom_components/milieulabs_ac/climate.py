@@ -113,7 +113,7 @@ class MilieuACZoneClimate(CoordinatorEntity, ClimateEntity):
         )
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, coordinator.lvr_shadow_name)},
-            name="Milieu Labs LVR",
+            name=f"{coordinator.hub_name} AC",
             manufacturer="Milieu Labs",
             model="LVR",
             via_device=(DOMAIN, coordinator.hub_shadow_name),
@@ -298,7 +298,7 @@ class MilieuACMainClimate(CoordinatorEntity, ClimateEntity):
         )
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, coordinator.lvr_shadow_name)},
-            name="Milieu Labs LVR",
+            name=f"{coordinator.hub_name} AC",
             manufacturer="Milieu Labs",
             model="LVR",
             via_device=(DOMAIN, coordinator.hub_shadow_name),
@@ -347,8 +347,13 @@ class MilieuACMainClimate(CoordinatorEntity, ClimateEntity):
 
     @property
     def current_temperature(self) -> float | None:
-        """Return the main hub sensor temperature."""
-        return (self.coordinator.data or {}).get("temperature")
+        """Return the room temperature for this hub.
+
+        ``coordinator.data`` is always empty -- this integration is push-only
+        and _async_update_data returns {} -- so reading it here meant the
+        entity never reported a temperature at all.
+        """
+        return self.coordinator.room_temperature
 
     @property
     def hvac_mode(self) -> HVACMode:

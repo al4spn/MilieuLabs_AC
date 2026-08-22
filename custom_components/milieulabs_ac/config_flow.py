@@ -33,6 +33,9 @@ class MilieuLabsACConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._hub_shadow_list: list[str] = []
         self._lvr_shadow_list: list[str] = []
         self._auth_result: dict[str, Any] = {}
+        # shadowName -> human name, and shadowName -> paired LVR shadowName
+        self._hub_names: dict[str, str] = {}
+        self._hub_to_lvr: dict[str, str] = {}
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Handle the initial step."""
@@ -69,28 +72,41 @@ class MilieuLabsACConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_select_shadow(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Handle device selection step."""
         if user_input is not None:
+            hub_shadow = user_input["hub_shadow"]
             # Create unique ID based on hub shadow name
-            await self.async_set_unique_id(user_input["hub_shadow"])
+            await self.async_set_unique_id(hub_shadow)
             self._abort_if_unique_id_configured()
 
+            hub_name = self._hub_names.get(hub_shadow) or hub_shadow[-6:]
+            lvr_shadow = user_input.get("lvr_shadow") or self._hub_to_lvr.get(hub_shadow)
+            if not lvr_shadow:
+                return self.async_abort(reason="no_devices")
+
             return self.async_create_entry(
-                title=f"Milieu Labs AC - {user_input['hub_shadow'][:8]}",
+                title=f"Milieu Labs AC - {hub_name}",
                 data={
                     **self._auth_result,
-                    "hub_shadow_name": user_input["hub_shadow"],
-                    "lvr_shadow_name": user_input["lvr_shadow"],
+                    "hub_shadow_name": hub_shadow,
+                    "lvr_shadow_name": lvr_shadow,
+                    "hub_name": hub_name,
                 }
             )
 
         if not self._hub_shadow_list:
             return self.async_abort(reason="no_devices")
 
+        # Label each hub by its room name. The LVR is derived from the
+        # pairing the API reports, so it is only asked for when unknown.
+        hub_choices = {
+            shadow: self._hub_names.get(shadow, shadow) for shadow in self._hub_shadow_list
+        }
+        schema: dict[Any, Any] = {vol.Required("hub_shadow"): vol.In(hub_choices)}
+        if not self._hub_to_lvr:
+            schema[vol.Required("lvr_shadow")] = vol.In(self._lvr_shadow_list)
+
         return self.async_show_form(
             step_id="select_shadow",
-            data_schema=vol.Schema({
-                vol.Required("hub_shadow"): vol.In(self._hub_shadow_list),
-                vol.Required("lvr_shadow"): vol.In(self._lvr_shadow_list),
-            }),
+            data_schema=vol.Schema(schema),
             description_placeholders={
                 "hub_count": str(len(self._hub_shadow_list)),
                 "lvr_count": str(len(self._lvr_shadow_list)),
@@ -172,16 +188,28 @@ class MilieuLabsACConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             _LOGGER.debug("Fetching shadow names from API")
                             
                             for entry in data:
+                                serial_to_hub: dict[str, str] = {}
+
                                 # Get hub shadow names
                                 for hub in entry.get("hubs", []):
                                     if shadow_name := hub.get("shadowName"):
                                         self._hub_shadow_list.append(shadow_name)
+                                        if display := hub.get("displayName"):
+                                            self._hub_names[shadow_name] = display
+                                        if serial := hub.get("hubSerial"):
+                                            serial_to_hub[serial] = shadow_name
                                         _LOGGER.debug("Found hub: %s", shadow_name)
-                                
-                                # Get LVR shadow names
+
+                                # Get LVR shadow names. Each LVR names the hub
+                                # it belongs to, which is the only pairing the
+                                # API exposes -- the LVR display names are not
+                                # unique.
                                 for lvr in entry.get("lvrs", []):
                                     if shadow_name := lvr.get("shadowName"):
                                         self._lvr_shadow_list.append(shadow_name)
+                                        hub_shadow = serial_to_hub.get(lvr.get("hubSerial"))
+                                        if hub_shadow:
+                                            self._hub_to_lvr[hub_shadow] = shadow_name
                                         _LOGGER.debug("Found LVR: %s", shadow_name)
                             
                             _LOGGER.info(

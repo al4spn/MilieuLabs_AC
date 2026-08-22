@@ -10,6 +10,7 @@ from homeassistant.components.sensor import (
 from homeassistant.const import (
     PERCENTAGE,
     UnitOfPressure,
+    UnitOfTemperature,
 )
 from homeassistant.helpers.typing import StateType
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -25,6 +26,7 @@ async def async_setup_entry(hass, config_entry, async_add_entities) -> None:
     coordinator = hass.data[DOMAIN][config_entry.entry_id]["coordinator"]
 
     sensors = [
+        MilieuACHubTemperature(coordinator),
         MilieuACHubHumidity(coordinator),
         MilieuACHubPressure(coordinator),
         MilieuACHubCO2(coordinator),
@@ -58,7 +60,7 @@ class MilieuACHubSensorBase(CoordinatorEntity, SensorEntity):
         self._attr_name = name
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, coordinator.hub_shadow_name)},
-            name="Milieu Labs Hub",
+            name=f"{coordinator.hub_name} Hub",
             manufacturer="Milieu Labs",
             model="Hub",
         )
@@ -80,6 +82,22 @@ class MilieuACHubSensorBase(CoordinatorEntity, SensorEntity):
         return {
             "source": "hub_shadow",
         }
+
+
+class MilieuACHubTemperature(MilieuACHubSensorBase):
+    """Temperature sensor sourced from hub shadow BME280.
+
+    This is the wall-mounted sensor the thermostat itself reads, and it is
+    the value the climate entity reports as its current temperature.
+    """
+
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+    _attr_suggested_display_precision = 1
+
+    def __init__(self, coordinator) -> None:
+        super().__init__(coordinator, "Temperature", "temperature")
 
 
 class MilieuACHubHumidity(MilieuACHubSensorBase):

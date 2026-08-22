@@ -30,6 +30,7 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
         lvr_shadow_name: str,
         id_token: str,
         refresh_token: str,
+        hub_name: str | None = None,
     ) -> None:
         """Initialize the coordinator."""
         super().__init__(
@@ -39,6 +40,10 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
         )
         self.hub_shadow_name = hub_shadow_name
         self.lvr_shadow_name = lvr_shadow_name
+        # Room name for this hub, from the properties API at config time.
+        # Falls back to the tail of the shadow name so devices are still
+        # distinguishable on entries created before this was stored.
+        self.hub_name = hub_name or f"Hub {hub_shadow_name[-6:]}"
         self.id_token = id_token
         self.refresh_token = refresh_token
 
@@ -50,7 +55,9 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
         # System-level user settings from reported.Zone.user
         self.user_data: dict = {}        # Capabilities per userMode from reported.capabilities
         self.capabilities_data: dict = {}        # Hub shadow sensor readings (BME280, iAQ etc.)
-        self.hub_shadow_data: dict = {}        # Callback set by climate platform to add new zone climate entities
+        self.hub_shadow_data: dict = {}
+        # Last full LVR reported state, kept for values with no dedicated store
+        self.lvr_reported: dict = {}        # Callback set by climate platform to add new zone climate entities
         self._async_add_zone_climate_entities = None
         self._async_add_zone_number_entities = None
         self._known_zone_ids: set = set()
@@ -63,6 +70,22 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
     async def _async_update_data(self) -> dict:
         """No polling – all data arrives via MQTT shadow callbacks."""
         return {}
+
+    @property
+    def room_temperature(self) -> float | None:
+        """Current room temperature.
+
+        Prefers the hub's own BME280, which is the wall-mounted sensor the
+        thermostat shows. Falls back to the LVR's control temperature (deci-C)
+        for hubs that are undocked or not reporting.
+        """
+        temp = self.hub_shadow_data.get("temperature")
+        if temp is not None:
+            return round(float(temp), 1)
+        raw = self.lvr_reported.get("controlTemperature_dC")
+        if isinstance(raw, (int, float)) and raw:
+            return round(raw / 10.0, 1)
+        return None
 
     # ------------------------------------------------------------------
     # Zone temperature via AWS IoT Shadow / MQTT
@@ -514,6 +537,8 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
 
     def _process_zone_state(self, reported: dict) -> None:
         """Parse zone temperatures from shadow state and schedule HA updates."""
+        if isinstance(reported, dict):
+            self.lvr_reported = {**self.lvr_reported, **reported}
         _LOGGER.debug(
             "Processing zone state for %s – top-level keys: %s",
             self.lvr_shadow_name,
