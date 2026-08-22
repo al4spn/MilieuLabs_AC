@@ -333,8 +333,15 @@ class MilieuACMainClimate(CoordinatorEntity, ClimateEntity):
     # ------------------------------------------------------------------
 
     @property
-    def name(self) -> str:
-        return self._user.get("name") or "My AC"
+    def name(self) -> str | None:
+        """Inherit the device name.
+
+        With _attr_has_entity_name set, returning None makes this the
+        device's primary entity, so it reads as "Living Room AC" rather
+        than "Living Room AC My AC" -- every LVR on the account is named
+        "My AC", so the shadow name adds nothing.
+        """
+        return None
 
     # ------------------------------------------------------------------
     # State
