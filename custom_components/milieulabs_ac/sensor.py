@@ -8,7 +8,11 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.const import (
+    LIGHT_LUX,
     PERCENTAGE,
+    SIGNAL_STRENGTH_DECIBELS_MILLIWATT,
+    EntityCategory,
+    UnitOfElectricPotential,
     UnitOfPressure,
     UnitOfTemperature,
 )
@@ -30,6 +34,12 @@ async def async_setup_entry(hass, config_entry, async_add_entities) -> None:
         MilieuACHubHumidity(coordinator),
         MilieuACHubPressure(coordinator),
         MilieuACHubCO2(coordinator),
+        MilieuACHubVOC(coordinator),
+        MilieuACHubAQI(coordinator),
+        MilieuACHubIlluminance(coordinator),
+        MilieuACHubWifiRSSI(coordinator),
+        MilieuACHubBatteryVoltage(coordinator),
+        MilieuACHubBoardHotTemp(coordinator),
     ]
 
     async_add_entities(sensors, True)
@@ -137,3 +147,84 @@ class MilieuACHubCO2(MilieuACHubSensorBase):
 
     def __init__(self, coordinator) -> None:
         super().__init__(coordinator, "CO2", "co2")
+
+
+class MilieuACHubVOC(MilieuACHubSensorBase):
+    """VOC index sourced from hub shadow iAQ.
+
+    A unitless index, not a ppb concentration, so no device_class is set.
+    """
+
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:molecule"
+
+    def __init__(self, coordinator) -> None:
+        super().__init__(coordinator, "VOC", "voc")
+
+
+class MilieuACHubAQI(MilieuACHubSensorBase):
+    """Air quality index sourced from hub shadow iAQ."""
+
+    _attr_device_class = SensorDeviceClass.AQI
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_suggested_display_precision = 1
+
+    def __init__(self, coordinator) -> None:
+        super().__init__(coordinator, "Air Quality Index", "air_quality_index")
+
+
+class MilieuACHubIlluminance(MilieuACHubSensorBase):
+    """Ambient light sourced from hub shadow ISL29023."""
+
+    _attr_device_class = SensorDeviceClass.ILLUMINANCE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = LIGHT_LUX
+    _attr_suggested_display_precision = 0
+
+    def __init__(self, coordinator) -> None:
+        super().__init__(coordinator, "Illuminance", "illuminance")
+
+
+class MilieuACHubWifiRSSI(MilieuACHubSensorBase):
+    """Hub Wi-Fi signal strength — diagnostic."""
+
+    _attr_device_class = SensorDeviceClass.SIGNAL_STRENGTH
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = SIGNAL_STRENGTH_DECIBELS_MILLIWATT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_entity_registry_enabled_default = False
+
+    def __init__(self, coordinator) -> None:
+        super().__init__(coordinator, "Wi-Fi Signal", "wifi_rssi")
+
+
+class MilieuACHubBatteryVoltage(MilieuACHubSensorBase):
+    """Hub battery voltage sourced from hub shadow GASGAUGE — diagnostic."""
+
+    _attr_device_class = SensorDeviceClass.VOLTAGE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = UnitOfElectricPotential.VOLT
+    _attr_suggested_display_precision = 2
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_entity_registry_enabled_default = False
+
+    def __init__(self, coordinator) -> None:
+        super().__init__(coordinator, "Battery Voltage", "battery_voltage")
+
+
+class MilieuACHubBoardHotTemp(MilieuACHubSensorBase):
+    """Board hot-side NTC temperature — diagnostic.
+
+    Runs well above ambient; useful for understanding the thermal gradient the
+    reported BME280 temperature is corrected against, not as a room reading.
+    """
+
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+    _attr_suggested_display_precision = 1
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_entity_registry_enabled_default = False
+
+    def __init__(self, coordinator) -> None:
+        super().__init__(coordinator, "Board Hot-Side Temperature", "board_hot_temp")

@@ -594,8 +594,41 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
                 updated = True
 
         iaq = reported.get("iAQ")
-        if isinstance(iaq, dict) and "CO2" in iaq:
-            self.hub_shadow_data["co2"] = iaq["CO2"]
+        if isinstance(iaq, dict):
+            if "CO2" in iaq:
+                self.hub_shadow_data["co2"] = iaq["CO2"]
+                updated = True
+            if "VOC" in iaq:
+                self.hub_shadow_data["voc"] = iaq["VOC"]
+                updated = True
+            if "AirQualityIndex" in iaq:
+                self.hub_shadow_data["air_quality_index"] = iaq["AirQualityIndex"]
+                updated = True
+
+        # Ambient light (Renesas ISL29023).
+        light = reported.get("ISL29023")
+        if isinstance(light, dict) and "Luminosity" in light:
+            self.hub_shadow_data["illuminance"] = light["Luminosity"]
+            updated = True
+
+        # Wi-Fi signal — diagnostic.
+        wifi = reported.get("WiFiManager")
+        if isinstance(wifi, dict) and "RSSI" in wifi:
+            self.hub_shadow_data["wifi_rssi"] = wifi["RSSI"]
+            updated = True
+
+        # Battery gauge — the shadow reports millivolts.
+        gauge = reported.get("GASGAUGE")
+        if isinstance(gauge, dict) and "Voltage" in gauge:
+            self.hub_shadow_data["battery_voltage"] = gauge["Voltage"] / 1000.0
+            updated = True
+
+        # NTC thermal array — HotSideTemp is the board's own hot side, which
+        # runs well above ambient (the gradient the BME280 reading corrects for).
+        # Diagnostic only. Gate on Status so an errored block is not published.
+        ntc = reported.get("NTC")
+        if isinstance(ntc, dict) and ntc.get("Status") == 0 and "HotSideTemp" in ntc:
+            self.hub_shadow_data["board_hot_temp"] = ntc["HotSideTemp"]
             updated = True
 
         if updated:
