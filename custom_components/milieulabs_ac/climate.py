@@ -113,7 +113,7 @@ class MilieuACZoneClimate(CoordinatorEntity, ClimateEntity):
         )
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, coordinator.lvr_shadow_name)},
-            name="Milieu Labs LVR",
+            name=f"{coordinator.hub_name} AC",
             manufacturer="Milieu Labs",
             model="LVR",
             via_device=(DOMAIN, coordinator.hub_shadow_name),
@@ -160,7 +160,10 @@ class MilieuACZoneClimate(CoordinatorEntity, ClimateEntity):
 
     @property
     def available(self) -> bool:
-        return self._zone_id in self.coordinator.zone_data
+        return (
+            self._zone_id in self.coordinator.zone_data
+            and self.coordinator.lvr_online
+        )
 
     @property
     def current_temperature(self) -> float | None:
@@ -298,7 +301,7 @@ class MilieuACMainClimate(CoordinatorEntity, ClimateEntity):
         )
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, coordinator.lvr_shadow_name)},
-            name="Milieu Labs LVR",
+            name=f"{coordinator.hub_name} AC",
             manufacturer="Milieu Labs",
             model="LVR",
             via_device=(DOMAIN, coordinator.hub_shadow_name),
@@ -333,8 +336,15 @@ class MilieuACMainClimate(CoordinatorEntity, ClimateEntity):
     # ------------------------------------------------------------------
 
     @property
-    def name(self) -> str:
-        return self._user.get("name") or "My AC"
+    def name(self) -> str | None:
+        """Inherit the device name.
+
+        With _attr_has_entity_name set, returning None makes this the
+        device's primary entity, so it reads as "Living Room AC" rather
+        than "Living Room AC My AC" -- every LVR on the account is named
+        "My AC", so the shadow name adds nothing.
+        """
+        return None
 
     # ------------------------------------------------------------------
     # State
@@ -342,13 +352,20 @@ class MilieuACMainClimate(CoordinatorEntity, ClimateEntity):
 
     @property
     def available(self) -> bool:
-        # Available as soon as we have any user_data from the shadow
-        return bool(self.coordinator.user_data)
+        # Available once the shadow has given us user_data, and only while
+        # the LVR is actually reporting -- otherwise a dead in-wall unit
+        # keeps publishing its last temperature as though it were current.
+        return bool(self.coordinator.user_data) and self.coordinator.lvr_online
 
     @property
     def current_temperature(self) -> float | None:
-        """Return the main hub sensor temperature."""
-        return (self.coordinator.data or {}).get("temperature")
+        """Return the room temperature for this hub.
+
+        ``coordinator.data`` is always empty -- this integration is push-only
+        and _async_update_data returns {} -- so reading it here meant the
+        entity never reported a temperature at all.
+        """
+        return self.coordinator.room_temperature
 
     @property
     def hvac_mode(self) -> HVACMode:

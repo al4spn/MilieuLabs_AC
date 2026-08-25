@@ -33,6 +33,7 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
     refresh_token = config_entry.data.get("refresh_token")
     hub_shadow_name = config_entry.data.get("hub_shadow_name")
     lvr_shadow_name = config_entry.data.get("lvr_shadow_name")
+    hub_name = config_entry.data.get("hub_name")
 
     # Validate required data
     if not all([id_token, refresh_token, hub_shadow_name, lvr_shadow_name]):
@@ -47,6 +48,7 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
             lvr_shadow_name=lvr_shadow_name,
             id_token=id_token,
             refresh_token=refresh_token,
+            hub_name=hub_name,
         )
         coordinator.config_entry = config_entry
 

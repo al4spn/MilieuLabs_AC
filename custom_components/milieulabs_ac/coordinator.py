@@ -1,6 +1,7 @@
 """Coordinator for Milieu Labs AC integration."""
 import logging
 import asyncio
+import time
 import boto3
 import uuid as _uuid
 from datetime import datetime, timedelta
@@ -13,6 +14,9 @@ class _TokenExpiredError(Exception):
 from homeassistant.core import HomeAssistant
 from .const import (
     DOMAIN,
+    HUB_STALE_AFTER_S,
+    HUB_SENSOR_BLOCKS,
+    SCAN_INTERVAL,
     ClientId,
     MQTT_ENDPOINT, AWS_REGION, COGNITO_IDENTITY_POOL_ID, COGNITO_IDP,
 )
@@ -30,15 +34,25 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
         lvr_shadow_name: str,
         id_token: str,
         refresh_token: str,
+        hub_name: str | None = None,
     ) -> None:
         """Initialize the coordinator."""
         super().__init__(
             hass,
             _LOGGER,
             name=DOMAIN,
+            # State arrives by MQTT push, so this fetches nothing -- it exists
+            # so entities re-evaluate availability on a timer. Without it a hub
+            # that goes silent mid-run keeps its last value on display forever,
+            # because nothing would ever ask the entity to render again.
+            update_interval=SCAN_INTERVAL,
         )
         self.hub_shadow_name = hub_shadow_name
         self.lvr_shadow_name = lvr_shadow_name
+        # Room name for this hub, from the properties API at config time.
+        # Falls back to the tail of the shadow name so devices are still
+        # distinguishable on entries created before this was stored.
+        self.hub_name = hub_name or f"Hub {hub_shadow_name[-6:]}"
         self.id_token = id_token
         self.refresh_token = refresh_token
 
@@ -50,7 +64,14 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
         # System-level user settings from reported.Zone.user
         self.user_data: dict = {}        # Capabilities per userMode from reported.capabilities
         self.capabilities_data: dict = {}        # Hub shadow sensor readings (BME280, iAQ etc.)
-        self.hub_shadow_data: dict = {}        # Callback set by climate platform to add new zone climate entities
+        self.hub_shadow_data: dict = {}
+        # Last full LVR reported state, kept for values with no dedicated store
+        self.lvr_reported: dict = {}
+        # Newest shadow-metadata timestamp seen on the hub shadow (epoch sec).
+        # This is the device's own write time, NOT our receipt time -- a shadow
+        # GET of a long-dead hub returns instantly with ancient content, so
+        # stamping on arrival would make stale data look fresh.
+        self.hub_last_written: float | None = None        # Callback set by climate platform to add new zone climate entities
         self._async_add_zone_climate_entities = None
         self._async_add_zone_number_entities = None
         self._known_zone_ids: set = set()
@@ -63,6 +84,56 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
     async def _async_update_data(self) -> dict:
         """No polling – all data arrives via MQTT shadow callbacks."""
         return {}
+
+    @property
+    def hub_fresh(self) -> bool:
+        """Whether the hub shadow has been written recently enough to trust.
+
+        The hub keeps serving its last shadow forever after it dies, with no
+        error and no availability flag -- ``Status.isOnline`` is itself part of
+        that retained document and stays ``true``. One hub here was serving
+        readings 80 days old, and the only reason it was caught is that its
+        barometric pressure sat 19 hPa below every other room in the house.
+
+        Six hours: healthy hubs report on change, not on a schedule, and were
+        observed between 17 minutes and 2h47m apart, so this leaves headroom
+        over the slowest normal case without letting a dead hub masquerade
+        for long. Unknown timestamps are treated as fresh rather than hiding
+        data we simply cannot date.
+        """
+        if self.hub_last_written is None:
+            return True
+        return (time.time() - self.hub_last_written) < HUB_STALE_AFTER_S
+
+    @property
+    def lvr_online(self) -> bool:
+        """Whether the in-wall LVR is still reporting.
+
+        The hub (dockable Wi-Fi head) and the LVR (in-wall base) fail
+        independently. A hub can stay online and keep serving its last shadow
+        while its LVR is dead, so the shadow answers with plausible values
+        that are actually frozen -- indistinguishable from live ones.
+
+        ``lastSeenUTC_s`` cannot be used to detect this: healthy units report
+        epoch or months-old timestamps for it. ``online`` is the reliable flag.
+        """
+        return self.lvr_reported.get("online") is not False
+
+    @property
+    def room_temperature(self) -> float | None:
+        """Current room temperature.
+
+        Prefers the hub's own BME280, which is the wall-mounted sensor the
+        thermostat shows. Falls back to the LVR's control temperature (deci-C)
+        for hubs that are undocked or not reporting.
+        """
+        temp = self.hub_shadow_data.get("temperature")
+        if temp is not None:
+            return round(float(temp), 1)
+        raw = self.lvr_reported.get("controlTemperature_dC")
+        if isinstance(raw, (int, float)) and raw:
+            return round(raw / 10.0, 1)
+        return None
 
     # ------------------------------------------------------------------
     # Zone temperature via AWS IoT Shadow / MQTT
@@ -440,11 +511,43 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
 
     # Hub shadow callbacks
 
+    @staticmethod
+    def _newest_metadata_timestamp(metadata) -> float | None:
+        """Deepest-nested newest ``timestamp`` in a shadow metadata tree."""
+        newest: float | None = None
+
+        def walk(node) -> None:
+            nonlocal newest
+            if isinstance(node, dict):
+                ts = node.get("timestamp")
+                if isinstance(ts, (int, float)) and (newest is None or ts > newest):
+                    newest = float(ts)
+                for value in node.values():
+                    walk(value)
+
+        walk(metadata)
+        return newest
+
+    def _record_hub_write_time(self, response) -> None:
+        """Track when the hub itself last wrote, from the shadow metadata."""
+        metadata = getattr(response, "metadata", None)
+        reported_meta = getattr(metadata, "reported", None) if metadata else None
+        if not reported_meta:
+            return
+        newest = None
+        for block in HUB_SENSOR_BLOCKS:
+            ts = self._newest_metadata_timestamp(reported_meta.get(block))
+            if ts is not None and (newest is None or ts > newest):
+                newest = ts
+        if newest is not None:
+            self.hub_last_written = newest
+
     def _on_hub_shadow_response(self, response) -> None:
         """Handle GetShadow accepted for the hub shadow."""
         try:
             if response is None or response.state is None:
                 return
+            self._record_hub_write_time(response)
             reported = response.state.reported or {}
             _LOGGER.debug("Hub shadow GET reported keys: %s", list(reported.keys()))
             self._process_hub_state(reported)
@@ -456,6 +559,7 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
         try:
             if response is None or response.state is None:
                 return
+            self._record_hub_write_time(response)
             reported = response.state.reported
             if not reported:
                 return
@@ -491,8 +595,41 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
                 updated = True
 
         iaq = reported.get("iAQ")
-        if isinstance(iaq, dict) and "CO2" in iaq:
-            self.hub_shadow_data["co2"] = iaq["CO2"]
+        if isinstance(iaq, dict):
+            if "CO2" in iaq:
+                self.hub_shadow_data["co2"] = iaq["CO2"]
+                updated = True
+            if "VOC" in iaq:
+                self.hub_shadow_data["voc"] = iaq["VOC"]
+                updated = True
+            if "AirQualityIndex" in iaq:
+                self.hub_shadow_data["air_quality_index"] = iaq["AirQualityIndex"]
+                updated = True
+
+        # Ambient light (Renesas ISL29023).
+        light = reported.get("ISL29023")
+        if isinstance(light, dict) and "Luminosity" in light:
+            self.hub_shadow_data["illuminance"] = light["Luminosity"]
+            updated = True
+
+        # Wi-Fi signal — diagnostic.
+        wifi = reported.get("WiFiManager")
+        if isinstance(wifi, dict) and "RSSI" in wifi:
+            self.hub_shadow_data["wifi_rssi"] = wifi["RSSI"]
+            updated = True
+
+        # Battery gauge — the shadow reports millivolts.
+        gauge = reported.get("GASGAUGE")
+        if isinstance(gauge, dict) and "Voltage" in gauge:
+            self.hub_shadow_data["battery_voltage"] = gauge["Voltage"] / 1000.0
+            updated = True
+
+        # NTC thermal array — HotSideTemp is the board's own hot side, which
+        # runs well above ambient (the gradient the BME280 reading corrects for).
+        # Diagnostic only. Gate on Status so an errored block is not published.
+        ntc = reported.get("NTC")
+        if isinstance(ntc, dict) and ntc.get("Status") == 0 and "HotSideTemp" in ntc:
+            self.hub_shadow_data["board_hot_temp"] = ntc["HotSideTemp"]
             updated = True
 
         if updated:
@@ -515,6 +652,8 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
 
     def _process_zone_state(self, reported: dict) -> None:
         """Parse zone temperatures from shadow state and schedule HA updates."""
+        if isinstance(reported, dict):
+            self.lvr_reported = {**self.lvr_reported, **reported}
         _LOGGER.debug(
             "Processing zone state for %s – top-level keys: %s",
             self.lvr_shadow_name,

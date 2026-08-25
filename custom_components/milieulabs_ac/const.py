@@ -11,6 +11,17 @@ API_PROPERTIES_URL = "https://telemetry-api.milieulabs.com.au/V1/properties"
 ClientId = "2radg6bqpp45h9gm2t360fh60h"
 PoolId = "us-east-1_oOThwaWze"
 
+# A hub that dies keeps serving its retained shadow indefinitely, so treat
+# readings older than this as unavailable rather than current. See
+# MilieulabsacCoordinator.hub_fresh for how the figure was chosen.
+HUB_STALE_AFTER_S = 6 * 60 * 60
+
+# Only these shadow blocks prove the HUB is alive. Freshness must not be taken
+# from the whole metadata tree: "Status" (which carries isOnline) is written by
+# the cloud, not the device, and on a hub dead since June it was still being
+# stamped hourly -- so a whole-tree maximum reports a corpse as healthy.
+HUB_SENSOR_BLOCKS = ("BME280", "iAQ")
+
 # Update intervals
 SCAN_INTERVAL = timedelta(minutes=5)  # Changed from 1 hour to 5 minutes
 DEFAULT_TIMEOUT = 10
