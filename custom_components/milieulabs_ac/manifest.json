@@ -1,7 +1,7 @@
 {
     "domain": "milieulabs_ac",
     "name": "Milieu Labs AC",
-    "codeowners": [ "@AL4SPN" ],
+    "codeowners": [ "@AL4SPN", "@rktdno" ],
     "config_flow": true,
     "dependencies": [],
     "documentation": "https://github.com/al4spn/MilieuLabs_AC",
