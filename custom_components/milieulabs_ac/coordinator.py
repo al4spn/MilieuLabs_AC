@@ -92,6 +92,7 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
                 self.config_entry.async_start_reauth(self.hass)
         except Exception as err:
             _LOGGER.error("Failed to start MQTT for zone temperatures: %s", err, exc_info=True)
+            raise
 
     async def async_teardown_mqtt(self) -> None:
         """Disconnect MQTT cleanly on unload."""
