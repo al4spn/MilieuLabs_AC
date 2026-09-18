@@ -6,6 +6,7 @@ import boto3
 import uuid as _uuid
 from datetime import datetime, timedelta
 from botocore.exceptions import ClientError
+from homeassistant.components import persistent_notification
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 
@@ -17,6 +18,8 @@ from .const import (
     HUB_STALE_AFTER_S,
     HUB_SENSOR_BLOCKS,
     SCAN_INTERVAL,
+    COMMAND_VERIFY_TIMEOUT,
+    COMMAND_MAX_ATTEMPTS,
     ClientId,
     MQTT_ENDPOINT, AWS_REGION, COGNITO_IDENTITY_POOL_ID, COGNITO_IDP,
 )
@@ -78,6 +81,11 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
         # MQTT internals
         self._mqtt_connection = None
         self._shadow_client = None
+        # Commands awaiting device confirmation, keyed by "scope:id:field"
+        # (e.g. "zone:ZONE_1:userSetCoolSetPoint_dC", "user:userMode").
+        # See _async_track_command for the verify/retry/revert lifecycle.
+        self._pending_commands: dict = {}
+        self._command_seq = 0
 
         _LOGGER.debug("Milieulabs Coordinator initialized")
 
@@ -436,7 +444,7 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
                 return
             reported = response.state.reported or {}
             _LOGGER.debug("Shadow reported state for %s: %s", self.lvr_shadow_name, reported)
-            self._process_zone_state(reported)
+            self._process_zone_state(reported, is_reported=True)
         except Exception as err:
             _LOGGER.error("Error processing shadow response: %s", err, exc_info=True)
 
@@ -456,6 +464,12 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
         with state.desired set to our payload and state.reported absent.  Processing
         the desired payload here confirms the shadow recorded the command and keeps
         local state in sync without waiting for the device to report back.
+
+        Only the `reported` branch here is proof the *device* applied a change –
+        it is the device, not the cloud, that publishes an update carrying
+        `reported`. The `desired`-only branch is just AWS IoT echoing back our
+        own publish, so it must not be treated as command confirmation (see
+        _async_track_command / _confirm_from_reported).
         """
         try:
             _LOGGER.debug("Shadow update_accepted callback fired for %s", self.lvr_shadow_name)
@@ -468,7 +482,7 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
                     "Shadow update_accepted reported keys for %s: %s",
                     self.lvr_shadow_name, list(reported.keys()),
                 )
-                self._process_zone_state(reported)
+                self._process_zone_state(reported, is_reported=True)
             else:
                 # No reported state – this is our own desired-state publish being
                 # confirmed.  Apply the desired payload so the UI reflects the
@@ -479,7 +493,7 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
                         "Shadow update_accepted confirmed desired state for %s: keys=%s",
                         self.lvr_shadow_name, list(desired.keys()),
                     )
-                    self._process_zone_state(desired)
+                    self._process_zone_state(desired, is_reported=False)
                 else:
                     _LOGGER.debug(
                         "update_shadow_accepted had no reported or desired state for %s",
@@ -650,8 +664,16 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
         """Notify all listeners that hub shadow data has changed."""
         self.async_update_listeners()
 
-    def _process_zone_state(self, reported: dict) -> None:
-        """Parse zone temperatures from shadow state and schedule HA updates."""
+    def _process_zone_state(self, reported: dict, is_reported: bool = False) -> None:
+        """Parse zone temperatures from shadow state and schedule HA updates.
+
+        Args:
+            is_reported: True only when ``reported`` came from a genuine
+                device-published `reported` block (GetShadow, or an
+                update/accepted that carried `reported`) rather than our own
+                `desired` publish being echoed back. Only in that case can
+                fields here be used to confirm a pending command was applied.
+        """
         if isinstance(reported, dict):
             self.lvr_reported = {**self.lvr_reported, **reported}
         _LOGGER.debug(
@@ -684,6 +706,8 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
 
         # Merge incoming system user settings (Zone.user)
         if isinstance(user_dict, dict) and user_dict:
+            if is_reported:
+                self._confirm_from_reported("user", user_dict)
             self.user_data = {**self.user_data, **user_dict}
             user_updated = True
             _LOGGER.debug(
@@ -694,6 +718,8 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
         # Merge any incoming head data into the shared heads_data store
         for head_id, head_info in heads_dict.items():
             if isinstance(head_info, dict):
+                if is_reported:
+                    self._confirm_from_reported(f"head:{head_id}", head_info)
                 self.heads_data[head_id] = {
                     **self.heads_data.get(head_id, {}),
                     **head_info,
@@ -727,6 +753,9 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
                 if not isinstance(zone_info, dict):
                     _LOGGER.debug("Zone %s is not a dict – skipping", zone_id)
                     continue
+
+                if is_reported:
+                    self._confirm_from_reported(f"zone:{zone_id}", zone_info)
 
                 # Preserve previously known values for fields absent in a partial update
                 existing   = self.zone_data.get(zone_id, {})
@@ -864,6 +893,115 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
         # Notify all existing zone climate entities to refresh state
         self.async_update_listeners()
 
+    # ------------------------------------------------------------------
+    # Command verification
+    #
+    # A publish to `desired` can be silently dropped by the device (offline,
+    # busy, message lost) with no error anywhere in the AWS IoT round trip –
+    # the shadow update itself always succeeds since it only writes to the
+    # cloud document. The only proof a command actually took effect is the
+    # device echoing the same value back in a genuine `reported` block. This
+    # section tracks each published field, retries once if unconfirmed, and
+    # reverts the optimistic UI state (plus a notification) if it still isn't
+    # confirmed after the retry, so HA never keeps showing a state the unit
+    # never actually reached.
+    # ------------------------------------------------------------------
+
+    def _confirm_from_reported(self, prefix: str, data: dict) -> None:
+        """Clear pending-command tracking for fields confirmed by a genuine report.
+
+        Args:
+            prefix: Namespace for the command key, e.g. ``"zone:ZONE_1"`` or
+                ``"user"``.
+            data:   The genuine ``reported`` sub-dict for that scope.
+        """
+        if not isinstance(data, dict):
+            return
+        for key, value in data.items():
+            cmd_key = f"{prefix}:{key}"
+            pending = self._pending_commands.get(cmd_key)
+            if pending is not None and pending["expected_value"] == value:
+                del self._pending_commands[cmd_key]
+                _LOGGER.debug("Command confirmed by device: %s = %s", cmd_key, value)
+
+    def _notify_command_failed(self, cmd_key: str, message: str) -> None:
+        """Log and surface a command that the device never confirmed applying."""
+        _LOGGER.error("Milieu Labs AC command not applied: %s", message)
+        try:
+            persistent_notification.async_create(
+                self.hass,
+                message,
+                title="Milieu Labs AC – Command Not Applied",
+                notification_id=f"{DOMAIN}_{self.lvr_shadow_name}_{cmd_key}",
+            )
+        except Exception as err:
+            _LOGGER.debug("Could not create persistent notification: %s", err)
+
+    def _schedule_verification(self, coro, name: str) -> None:
+        """Run a verification coroutine tied to this config entry's lifetime."""
+        if self.config_entry is not None:
+            self.config_entry.async_create_background_task(self.hass, coro, name)
+        else:
+            self.hass.async_create_task(coro, name=name)
+
+    async def _async_track_command(
+        self,
+        cmd_key: str,
+        expected_value,
+        republish,
+        revert,
+        description: str,
+        attempt: int = 1,
+    ) -> None:
+        """Wait for the device to confirm a command; retry once, then revert.
+
+        Args:
+            cmd_key:        Unique key for the field being changed, e.g.
+                             ``"zone:ZONE_1:userSetCoolSetPoint_dC"``.
+            expected_value: The raw shadow value we expect to see echoed back
+                             in a genuine ``reported`` block.
+            republish:      Zero-arg async callable that re-sends the same
+                             desired-state publish.
+            revert:         Zero-arg sync callable that rolls the optimistic
+                             local state for this field back to its prior value.
+            description:    Human-readable summary used in the failure
+                             notification/log if the command is never confirmed.
+        """
+        self._command_seq += 1
+        token = self._command_seq
+        self._pending_commands[cmd_key] = {"token": token, "expected_value": expected_value}
+
+        await asyncio.sleep(COMMAND_VERIFY_TIMEOUT)
+
+        pending = self._pending_commands.get(cmd_key)
+        if pending is None or pending["token"] != token:
+            # Confirmed by the device, or superseded by a newer command on
+            # the same field – either way, nothing to do here.
+            return
+        del self._pending_commands[cmd_key]
+
+        if attempt < COMMAND_MAX_ATTEMPTS:
+            _LOGGER.warning(
+                "Command not confirmed by device within %ss – retrying once: %s (expected %s)",
+                COMMAND_VERIFY_TIMEOUT, cmd_key, expected_value,
+            )
+            try:
+                await republish()
+            except Exception as err:
+                _LOGGER.error("Retry publish failed for %s: %s", cmd_key, err, exc_info=True)
+            await self._async_track_command(
+                cmd_key, expected_value, republish, revert, description, attempt=attempt + 1,
+            )
+            return
+
+        _LOGGER.error(
+            "Command still not confirmed by device after retry – reverting: %s (expected %s)",
+            cmd_key, expected_value,
+        )
+        revert()
+        self.async_update_listeners()
+        self._notify_command_failed(cmd_key, description)
+
     async def async_publish_zone_setpoint(
         self, zone_id: str, key: str, value_celsius: float
     ) -> None:
@@ -880,31 +1018,58 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
             zone_id, key, value_dc, value_celsius, self.lvr_shadow_name,
         )
 
-        def publish_sync() -> None:
-            from awscrt import mqtt
-            from awsiot import iotshadow
+        previous_value = self.zone_data.get(zone_id, {}).get("raw", {}).get(key)
 
-            future = self._shadow_client.publish_update_shadow(
-                request=iotshadow.UpdateShadowRequest(
-                    thing_name=self.lvr_shadow_name,
-                    state=iotshadow.ShadowState(
-                        desired={"Zone": {"zones": {zone_id: {key: value_dc}}}}
+        async def _publish() -> None:
+            def publish_sync() -> None:
+                from awscrt import mqtt
+                from awsiot import iotshadow
+
+                future = self._shadow_client.publish_update_shadow(
+                    request=iotshadow.UpdateShadowRequest(
+                        thing_name=self.lvr_shadow_name,
+                        state=iotshadow.ShadowState(
+                            desired={"Zone": {"zones": {zone_id: {key: value_dc}}}}
+                        ),
                     ),
-                ),
-                qos=mqtt.QoS.AT_LEAST_ONCE,
-            )
-            future.result(10)  # block up to 10 s for publish ACK
+                    qos=mqtt.QoS.AT_LEAST_ONCE,
+                )
+                future.result(10)  # block up to 10 s for publish ACK
 
-        await self.hass.async_add_executor_job(publish_sync)
+            await self.hass.async_add_executor_job(publish_sync)
+
+        await _publish()
 
         # Optimistically update local raw state so the UI reflects the change
-        zone_raw = self.zone_data.get(zone_id, {}).get("raw", {})
-        if isinstance(zone_raw, dict):
-            zone_raw[key] = value_dc
+        zone_raw = self.zone_data.setdefault(zone_id, {}).setdefault("raw", {})
+        zone_raw[key] = value_dc
         self.async_update_listeners()
         _LOGGER.info(
             "Shadow update published: zone=%s %s=%.1f °C (%d dC)",
             zone_id, key, value_celsius, value_dc,
+        )
+
+        def _revert() -> None:
+            raw = self.zone_data.get(zone_id, {}).get("raw", {})
+            if isinstance(raw, dict):
+                if previous_value is None:
+                    raw.pop(key, None)
+                else:
+                    raw[key] = previous_value
+
+        zone_name = self.zone_data.get(zone_id, {}).get("name", zone_id)
+        self._schedule_verification(
+            self._async_track_command(
+                cmd_key=f"zone:{zone_id}:{key}",
+                expected_value=value_dc,
+                republish=_publish,
+                revert=_revert,
+                description=(
+                    f"{zone_name}: {key} change to {value_celsius:.1f} °C "
+                    f"was not confirmed by the device."
+                ),
+            ),
+            name=f"milieulabs_verify_zone_{zone_id}_{key}",
         )
 
     async def async_publish_zone_desired(
@@ -922,35 +1087,73 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
             self.lvr_shadow_name, zone_id, fields,
         )
 
-        def publish_sync() -> None:
-            from awscrt import mqtt
-            from awsiot import iotshadow
+        previous_values = {
+            key: self.zone_data.get(zone_id, {}).get("raw", {}).get(key)
+            for key in fields
+        }
+        previous_zone_state = self.zone_data.get(zone_id, {}).get("zone_state")
 
-            future = self._shadow_client.publish_update_shadow(
-                request=iotshadow.UpdateShadowRequest(
-                    thing_name=self.lvr_shadow_name,
-                    state=iotshadow.ShadowState(
-                        desired={"Zone": {"zones": {zone_id: fields}}}
+        async def _publish() -> None:
+            def publish_sync() -> None:
+                from awscrt import mqtt
+                from awsiot import iotshadow
+
+                future = self._shadow_client.publish_update_shadow(
+                    request=iotshadow.UpdateShadowRequest(
+                        thing_name=self.lvr_shadow_name,
+                        state=iotshadow.ShadowState(
+                            desired={"Zone": {"zones": {zone_id: fields}}}
+                        ),
                     ),
-                ),
-                qos=mqtt.QoS.AT_LEAST_ONCE,
-            )
-            future.result(10)
+                    qos=mqtt.QoS.AT_LEAST_ONCE,
+                )
+                future.result(10)
 
-        await self.hass.async_add_executor_job(publish_sync)
+            await self.hass.async_add_executor_job(publish_sync)
+
+        await _publish()
 
         # Optimistically update local zone data so the UI reflects the change
         if zone_id in self.zone_data:
             if "state" in fields:
                 self.zone_data[zone_id]["zone_state"] = fields["state"]
-            zone_raw = self.zone_data[zone_id].get("raw", {})
-            if isinstance(zone_raw, dict):
-                zone_raw.update(fields)
+            zone_raw = self.zone_data[zone_id].setdefault("raw", {})
+            zone_raw.update(fields)
         self.async_update_listeners()
         _LOGGER.info(
             "Shadow desired published: zone=%s fields=%s",
             zone_id, fields,
         )
+
+        zone_name = self.zone_data.get(zone_id, {}).get("name", zone_id)
+
+        for key, value in fields.items():
+            def _make_revert(key=key, prev=previous_values[key]):
+                def _revert() -> None:
+                    raw = self.zone_data.get(zone_id, {}).get("raw", {})
+                    if isinstance(raw, dict):
+                        if prev is None:
+                            raw.pop(key, None)
+                        else:
+                            raw[key] = prev
+                    if key == "state" and zone_id in self.zone_data:
+                        self.zone_data[zone_id]["zone_state"] = (
+                            previous_zone_state if previous_zone_state is not None else "UNKNOWN"
+                        )
+                return _revert
+
+            self._schedule_verification(
+                self._async_track_command(
+                    cmd_key=f"zone:{zone_id}:{key}",
+                    expected_value=value,
+                    republish=_publish,
+                    revert=_make_revert(),
+                    description=(
+                        f"{zone_name}: {key} change to {value} was not confirmed by the device."
+                    ),
+                ),
+                name=f"milieulabs_verify_zone_{zone_id}_{key}",
+            )
 
     @property
     def system_user_mode(self) -> str:
@@ -977,22 +1180,31 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
             _LOGGER.warning("No heads known yet - cannot publish userMode")
             return
 
-        def publish_sync() -> None:
-            from awscrt import mqtt
-            from awsiot import iotshadow
+        previous_modes = {
+            head_id: head.get("userMode")
+            for head_id, head in self.heads_data.items()
+            if isinstance(head, dict)
+        }
 
-            future = self._shadow_client.publish_update_shadow(
-                request=iotshadow.UpdateShadowRequest(
-                    thing_name=self.lvr_shadow_name,
-                    state=iotshadow.ShadowState(
-                        desired={"Zone": {"heads": heads_payload}}
+        async def _publish() -> None:
+            def publish_sync() -> None:
+                from awscrt import mqtt
+                from awsiot import iotshadow
+
+                future = self._shadow_client.publish_update_shadow(
+                    request=iotshadow.UpdateShadowRequest(
+                        thing_name=self.lvr_shadow_name,
+                        state=iotshadow.ShadowState(
+                            desired={"Zone": {"heads": heads_payload}}
+                        ),
                     ),
-                ),
-                qos=mqtt.QoS.AT_LEAST_ONCE,
-            )
-            future.result(10)
+                    qos=mqtt.QoS.AT_LEAST_ONCE,
+                )
+                future.result(10)
 
-        await self.hass.async_add_executor_job(publish_sync)
+            await self.hass.async_add_executor_job(publish_sync)
+
+        await _publish()
 
         # Optimistically update all heads and user_data
         for head in self.heads_data.values():
@@ -1001,6 +1213,35 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
         self.user_data["userMode"] = user_mode
         self.async_update_listeners()
         _LOGGER.info("Head mode published: userMode=%s", user_mode)
+
+        # Verification/revert only touches heads_data here – the user-level
+        # "userMode" field is separately tracked by async_publish_user_settings
+        # (always called alongside this from the climate entity), so it isn't
+        # duplicated/raced across two independent revert paths.
+        for head_id in heads_payload:
+            def _make_revert(head_id=head_id, prev=previous_modes.get(head_id)):
+                def _revert() -> None:
+                    head = self.heads_data.get(head_id)
+                    if isinstance(head, dict):
+                        if prev is None:
+                            head.pop("userMode", None)
+                        else:
+                            head["userMode"] = prev
+                return _revert
+
+            self._schedule_verification(
+                self._async_track_command(
+                    cmd_key=f"head:{head_id}:userMode",
+                    expected_value=user_mode,
+                    republish=_publish,
+                    revert=_make_revert(),
+                    description=(
+                        f"System mode change to {user_mode} was not confirmed "
+                        f"by the device (head {head_id})."
+                    ),
+                ),
+                name=f"milieulabs_verify_head_{head_id}_userMode",
+            )
 
     async def async_publish_user_settings(self, fields: dict) -> None:
         """Publish arbitrary fields to desired.Zone.user in the AWS IoT shadow.
@@ -1014,24 +1255,52 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
             self.lvr_shadow_name, fields,
         )
 
-        def publish_sync() -> None:
-            from awscrt import mqtt
-            from awsiot import iotshadow
+        previous_values = {key: self.user_data.get(key) for key in fields}
 
-            future = self._shadow_client.publish_update_shadow(
-                request=iotshadow.UpdateShadowRequest(
-                    thing_name=self.lvr_shadow_name,
-                    state=iotshadow.ShadowState(
-                        desired={"user": fields}
+        async def _publish() -> None:
+            def publish_sync() -> None:
+                from awscrt import mqtt
+                from awsiot import iotshadow
+
+                future = self._shadow_client.publish_update_shadow(
+                    request=iotshadow.UpdateShadowRequest(
+                        thing_name=self.lvr_shadow_name,
+                        state=iotshadow.ShadowState(
+                            desired={"user": fields}
+                        ),
                     ),
-                ),
-                qos=mqtt.QoS.AT_LEAST_ONCE,
-            )
-            future.result(10)
+                    qos=mqtt.QoS.AT_LEAST_ONCE,
+                )
+                future.result(10)
 
-        await self.hass.async_add_executor_job(publish_sync)
+            await self.hass.async_add_executor_job(publish_sync)
+
+        await _publish()
 
         # Optimistically update local user_data so UI reflects the change
         self.user_data.update(fields)
         self.async_update_listeners()
         _LOGGER.info("User settings published: %s", fields)
+
+        for key, value in fields.items():
+            def _make_revert(key=key, prev=previous_values[key]):
+                def _revert() -> None:
+                    if prev is None:
+                        self.user_data.pop(key, None)
+                    else:
+                        self.user_data[key] = prev
+                return _revert
+
+            self._schedule_verification(
+                self._async_track_command(
+                    cmd_key=f"user:{key}",
+                    expected_value=value,
+                    republish=_publish,
+                    revert=_make_revert(),
+                    description=(
+                        f"System setting '{key}' change to {value} was not "
+                        f"confirmed by the device."
+                    ),
+                ),
+                name=f"milieulabs_verify_user_{key}",
+            )
