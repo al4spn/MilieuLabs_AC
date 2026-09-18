@@ -12,7 +12,7 @@ from .coordinator import MilieulabsacCoordinator
 _LOGGER = logging.getLogger(__name__)
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
-PLATFORMS = [Platform.SENSOR, Platform.CLIMATE]
+PLATFORMS = [Platform.SENSOR, Platform.CLIMATE, Platform.NUMBER]
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
