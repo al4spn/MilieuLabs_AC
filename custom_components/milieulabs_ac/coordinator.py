@@ -383,7 +383,7 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
         original WebSocket URL expire.  The SDK's built-in reconnect loop
         cannot re-auth, so we do a full teardown + re-setup with fresh tokens.
         """
-        _LOGGER.warning(
+        _LOGGER.debug(
             "MQTT connection interrupted (error=%s) – scheduling full reconnect", error
         )
         # Null out the handles so async_setup_mqtt will not skip setup
