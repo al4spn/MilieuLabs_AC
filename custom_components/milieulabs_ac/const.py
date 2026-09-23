@@ -30,7 +30,7 @@ DEFAULT_TIMEOUT = 10
 # matches a command we published to *desired* before treating it as dropped.
 # The device only pushes a fresh `reported` block when it actually acts on a
 # delta, so this is the only reliable signal that a command was applied.
-COMMAND_VERIFY_TIMEOUT = 30
+COMMAND_VERIFY_TIMEOUT = 60
 # Total attempts per command: 1 initial publish + (COMMAND_MAX_ATTEMPTS - 1) retries.
 COMMAND_MAX_ATTEMPTS = 2
 

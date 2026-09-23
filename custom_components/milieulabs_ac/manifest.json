@@ -8,7 +8,7 @@
     "iot_class": "cloud_push",
     "issue_tracker": "https://github.com/al4spn/MilieuLabs_AC/issues",
     "requirements": ["awsiotsdk>=1.21.0", "awscrt>=0.19.0"],
-    "version": "1.0.5",
+    "version": "1.0.6",
     "integration_type" : "hub",
     "loggers": ["custom_components.milieulabs_ac"]
 }
