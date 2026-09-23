@@ -389,6 +389,11 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
         # Null out the handles so async_setup_mqtt will not skip setup
         self._mqtt_connection = None
         self._shadow_client = None
+        # Cancel all pending command verifications. Each _async_track_command
+        # coroutine checks _pending_commands after its sleep; clearing the dict
+        # makes them exit cleanly instead of retrying over a dead connection
+        # and firing spurious "Command Not Applied" notifications.
+        self._pending_commands.clear()
         coro = self._async_reconnect_mqtt()
         try:
             asyncio.run_coroutine_threadsafe(coro, self.hass.loop)
