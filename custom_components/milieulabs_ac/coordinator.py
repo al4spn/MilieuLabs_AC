@@ -986,26 +986,25 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
         del self._pending_commands[cmd_key]
 
         if attempt < COMMAND_MAX_ATTEMPTS:
-            _LOGGER.warning(
-                "Command not confirmed by device within %ss – retrying once: %s (expected %s)",
+            _LOGGER.debug(
+                "Command not confirmed by device within %ss – retrying: %s (expected %s)",
                 COMMAND_VERIFY_TIMEOUT, cmd_key, expected_value,
             )
             try:
                 await republish()
             except Exception as err:
-                _LOGGER.error("Retry publish failed for %s: %s", cmd_key, err, exc_info=True)
+                _LOGGER.debug("Retry publish failed for %s: %s", cmd_key, err)
             await self._async_track_command(
                 cmd_key, expected_value, republish, revert, description, attempt=attempt + 1,
             )
             return
 
-        _LOGGER.error(
-            "Command still not confirmed by device after retry – reverting: %s (expected %s)",
-            cmd_key, expected_value,
+        # Device never echoed the command back, but it may have applied it silently.
+        # Don't revert or alert — keep the optimistic state so the UI stays consistent.
+        _LOGGER.debug(
+            "Command unconfirmed after %d attempt(s) – keeping optimistic state: %s (expected %s)",
+            COMMAND_MAX_ATTEMPTS, cmd_key, expected_value,
         )
-        revert()
-        self.async_update_listeners()
-        self._notify_command_failed(cmd_key, description)
 
     async def async_publish_zone_setpoint(
         self, zone_id: str, key: str, value_celsius: float
