@@ -1029,6 +1029,9 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
                 from awscrt import mqtt
                 from awsiot import iotshadow
 
+                if self._shadow_client is None:
+                    raise RuntimeError("MQTT not connected – cannot publish shadow update")
+
                 future = self._shadow_client.publish_update_shadow(
                     request=iotshadow.UpdateShadowRequest(
                         thing_name=self.lvr_shadow_name,
@@ -1101,6 +1104,9 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
             def publish_sync() -> None:
                 from awscrt import mqtt
                 from awsiot import iotshadow
+
+                if self._shadow_client is None:
+                    raise RuntimeError("MQTT not connected – cannot publish shadow update")
 
                 future = self._shadow_client.publish_update_shadow(
                     request=iotshadow.UpdateShadowRequest(
@@ -1195,6 +1201,9 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
                 from awscrt import mqtt
                 from awsiot import iotshadow
 
+                if self._shadow_client is None:
+                    raise RuntimeError("MQTT not connected – cannot publish shadow update")
+
                 future = self._shadow_client.publish_update_shadow(
                     request=iotshadow.UpdateShadowRequest(
                         thing_name=self.lvr_shadow_name,
@@ -1265,6 +1274,9 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
             def publish_sync() -> None:
                 from awscrt import mqtt
                 from awsiot import iotshadow
+
+                if self._shadow_client is None:
+                    raise RuntimeError("MQTT not connected – cannot publish shadow update")
 
                 future = self._shadow_client.publish_update_shadow(
                     request=iotshadow.UpdateShadowRequest(
