@@ -409,31 +409,41 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
         )
 
     async def _async_reconnect_mqtt(self) -> None:
-        """Wait briefly, then re-establish MQTT with freshly refreshed credentials.
+        """Re-establish MQTT with freshly refreshed credentials.
 
-        If the lightweight reconnect fails for any reason other than an expired
-        Cognito token, fall back to a full integration reload so the entry is
-        torn down and re-initialised cleanly (equivalent to the manual reload
-        that resolves persistent MQTT_TIMEOUT drops).
+        Retries with exponential backoff (5 s → 15 s → 30 s → 60 s → 120 s)
+        before giving up and triggering a full integration reload.
+        Token expiry triggers re-auth immediately without retrying.
         """
         import asyncio as _asyncio
-        _LOGGER.info("Waiting 5 s before MQTT reconnect...")
-        await _asyncio.sleep(5)
-        try:
-            await self.async_setup_mqtt()
-            _LOGGER.info("MQTT reconnected successfully")
-        except _TokenExpiredError:
-            _LOGGER.warning(
-                "Cognito refresh token expired during MQTT reconnect – triggering re-authentication"
+
+        delays = [5, 15, 30, 60, 120]
+        for attempt, delay in enumerate(delays, start=1):
+            _LOGGER.info(
+                "MQTT reconnect attempt %d/%d – waiting %d s...",
+                attempt, len(delays), delay,
             )
-            if self.config_entry is not None:
-                self.config_entry.async_start_reauth(self.hass)
-        except Exception as err:
-            _LOGGER.error(
-                "MQTT reconnect failed (%s) – scheduling full integration reload", err
-            )
-            if self.config_entry is not None:
-                self.hass.config_entries.async_schedule_reload(self.config_entry.entry_id)
+            await _asyncio.sleep(delay)
+            try:
+                await self.async_setup_mqtt()
+                _LOGGER.info("MQTT reconnected successfully (attempt %d)", attempt)
+                return
+            except _TokenExpiredError:
+                _LOGGER.warning(
+                    "Cognito refresh token expired during MQTT reconnect – triggering re-authentication"
+                )
+                if self.config_entry is not None:
+                    self.config_entry.async_start_reauth(self.hass)
+                return
+            except Exception as err:
+                _LOGGER.warning(
+                    "MQTT reconnect attempt %d/%d failed: %s",
+                    attempt, len(delays), err,
+                )
+
+        _LOGGER.error("MQTT reconnect failed after %d attempts – scheduling full integration reload", len(delays))
+        if self.config_entry is not None:
+            self.hass.config_entries.async_schedule_reload(self.config_entry.entry_id)
 
     # Shadow callbacks (called from MQTT thread)
 
