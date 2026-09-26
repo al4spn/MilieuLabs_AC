@@ -499,16 +499,17 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
                 )
                 self._process_zone_state(reported, is_reported=True)
             else:
-                # No reported state – this is our own desired-state publish being
-                # confirmed.  Apply the desired payload so the UI reflects the
-                # accepted command even before the device echoes it back.
+                # No reported state – this is AWS IoT echoing back our own desired
+                # publish.  This device doesn't reliably publish a reported update
+                # after applying commands, so treat AWS accepting the desired state
+                # as confirmation that the command was recorded and will be applied.
                 desired = response.state.desired
                 if desired:
                     _LOGGER.debug(
-                        "Shadow update_accepted confirmed desired state for %s: keys=%s",
+                        "Shadow update_accepted (desired-only) – treating as confirmation for %s: keys=%s",
                         self.lvr_shadow_name, list(desired.keys()),
                     )
-                    self._process_zone_state(desired, is_reported=False)
+                    self._process_zone_state(desired, is_reported=True)
                 else:
                     _LOGGER.debug(
                         "update_shadow_accepted had no reported or desired state for %s",
