@@ -409,31 +409,41 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
         )
 
     async def _async_reconnect_mqtt(self) -> None:
-        """Wait briefly, then re-establish MQTT with freshly refreshed credentials.
+        """Re-establish MQTT with freshly refreshed credentials.
 
-        If the lightweight reconnect fails for any reason other than an expired
-        Cognito token, fall back to a full integration reload so the entry is
-        torn down and re-initialised cleanly (equivalent to the manual reload
-        that resolves persistent MQTT_TIMEOUT drops).
+        Retries with exponential backoff (5 s → 15 s → 30 s → 60 s → 120 s)
+        before giving up and triggering a full integration reload.
+        Token expiry triggers re-auth immediately without retrying.
         """
         import asyncio as _asyncio
-        _LOGGER.info("Waiting 5 s before MQTT reconnect...")
-        await _asyncio.sleep(5)
-        try:
-            await self.async_setup_mqtt()
-            _LOGGER.info("MQTT reconnected successfully")
-        except _TokenExpiredError:
-            _LOGGER.warning(
-                "Cognito refresh token expired during MQTT reconnect – triggering re-authentication"
+
+        delays = [5, 15, 30, 60, 120]
+        for attempt, delay in enumerate(delays, start=1):
+            _LOGGER.info(
+                "MQTT reconnect attempt %d/%d – waiting %d s...",
+                attempt, len(delays), delay,
             )
-            if self.config_entry is not None:
-                self.config_entry.async_start_reauth(self.hass)
-        except Exception as err:
-            _LOGGER.error(
-                "MQTT reconnect failed (%s) – scheduling full integration reload", err
-            )
-            if self.config_entry is not None:
-                self.hass.config_entries.async_schedule_reload(self.config_entry.entry_id)
+            await _asyncio.sleep(delay)
+            try:
+                await self.async_setup_mqtt()
+                _LOGGER.info("MQTT reconnected successfully (attempt %d)", attempt)
+                return
+            except _TokenExpiredError:
+                _LOGGER.warning(
+                    "Cognito refresh token expired during MQTT reconnect – triggering re-authentication"
+                )
+                if self.config_entry is not None:
+                    self.config_entry.async_start_reauth(self.hass)
+                return
+            except Exception as err:
+                _LOGGER.warning(
+                    "MQTT reconnect attempt %d/%d failed: %s",
+                    attempt, len(delays), err,
+                )
+
+        _LOGGER.error("MQTT reconnect failed after %d attempts – scheduling full integration reload", len(delays))
+        if self.config_entry is not None:
+            self.hass.config_entries.async_schedule_reload(self.config_entry.entry_id)
 
     # Shadow callbacks (called from MQTT thread)
 
@@ -489,16 +499,17 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
                 )
                 self._process_zone_state(reported, is_reported=True)
             else:
-                # No reported state – this is our own desired-state publish being
-                # confirmed.  Apply the desired payload so the UI reflects the
-                # accepted command even before the device echoes it back.
+                # No reported state – this is AWS IoT echoing back our own desired
+                # publish.  This device doesn't reliably publish a reported update
+                # after applying commands, so treat AWS accepting the desired state
+                # as confirmation that the command was recorded and will be applied.
                 desired = response.state.desired
                 if desired:
                     _LOGGER.debug(
-                        "Shadow update_accepted confirmed desired state for %s: keys=%s",
+                        "Shadow update_accepted (desired-only) – treating as confirmation for %s: keys=%s",
                         self.lvr_shadow_name, list(desired.keys()),
                     )
-                    self._process_zone_state(desired, is_reported=False)
+                    self._process_zone_state(desired, is_reported=True)
                 else:
                     _LOGGER.debug(
                         "update_shadow_accepted had no reported or desired state for %s",
@@ -986,26 +997,25 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
         del self._pending_commands[cmd_key]
 
         if attempt < COMMAND_MAX_ATTEMPTS:
-            _LOGGER.warning(
-                "Command not confirmed by device within %ss – retrying once: %s (expected %s)",
+            _LOGGER.debug(
+                "Command not confirmed by device within %ss – retrying: %s (expected %s)",
                 COMMAND_VERIFY_TIMEOUT, cmd_key, expected_value,
             )
             try:
                 await republish()
             except Exception as err:
-                _LOGGER.error("Retry publish failed for %s: %s", cmd_key, err, exc_info=True)
+                _LOGGER.debug("Retry publish failed for %s: %s", cmd_key, err)
             await self._async_track_command(
                 cmd_key, expected_value, republish, revert, description, attempt=attempt + 1,
             )
             return
 
-        _LOGGER.error(
-            "Command still not confirmed by device after retry – reverting: %s (expected %s)",
-            cmd_key, expected_value,
+        # Device never echoed the command back, but it may have applied it silently.
+        # Don't revert or alert — keep the optimistic state so the UI stays consistent.
+        _LOGGER.debug(
+            "Command unconfirmed after %d attempt(s) – keeping optimistic state: %s (expected %s)",
+            COMMAND_MAX_ATTEMPTS, cmd_key, expected_value,
         )
-        revert()
-        self.async_update_listeners()
-        self._notify_command_failed(cmd_key, description)
 
     async def async_publish_zone_setpoint(
         self, zone_id: str, key: str, value_celsius: float
@@ -1029,6 +1039,9 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
             def publish_sync() -> None:
                 from awscrt import mqtt
                 from awsiot import iotshadow
+
+                if self._shadow_client is None:
+                    raise RuntimeError("MQTT not connected – cannot publish shadow update")
 
                 future = self._shadow_client.publish_update_shadow(
                     request=iotshadow.UpdateShadowRequest(
@@ -1102,6 +1115,9 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
             def publish_sync() -> None:
                 from awscrt import mqtt
                 from awsiot import iotshadow
+
+                if self._shadow_client is None:
+                    raise RuntimeError("MQTT not connected – cannot publish shadow update")
 
                 future = self._shadow_client.publish_update_shadow(
                     request=iotshadow.UpdateShadowRequest(
@@ -1196,6 +1212,9 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
                 from awscrt import mqtt
                 from awsiot import iotshadow
 
+                if self._shadow_client is None:
+                    raise RuntimeError("MQTT not connected – cannot publish shadow update")
+
                 future = self._shadow_client.publish_update_shadow(
                     request=iotshadow.UpdateShadowRequest(
                         thing_name=self.lvr_shadow_name,
@@ -1266,6 +1285,9 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
             def publish_sync() -> None:
                 from awscrt import mqtt
                 from awsiot import iotshadow
+
+                if self._shadow_client is None:
+                    raise RuntimeError("MQTT not connected – cannot publish shadow update")
 
                 future = self._shadow_client.publish_update_shadow(
                     request=iotshadow.UpdateShadowRequest(
