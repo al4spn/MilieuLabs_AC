@@ -136,7 +136,7 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
         """Return the device registry ID of the hub device, or None if not yet registered."""
         from homeassistant.helpers import device_registry as dr
         registry = dr.async_get(self.hass)
-        entry = registry.async_get_device(identifiers={(DOMAIN, self.hub_shadow_name)})
+        entry = registry.async_get_device_by_identifier((DOMAIN, self.hub_shadow_name))
         return entry.id if entry else None
 
     @property
