@@ -111,17 +111,22 @@ class MilieuACZoneClimate(CoordinatorEntity, ClimateEntity):
                 f"{DOMAIN}_{coordinator.lvr_shadow_name}_climate_{zone_id}",
             )
         )
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, coordinator.lvr_shadow_name)},
-            name=f"{coordinator.hub_name} AC",
-            manufacturer="Milieu Labs",
-            model="LVR",
-            via_device=(DOMAIN, coordinator.hub_shadow_name),
-        )
-
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        info = DeviceInfo(
+            identifiers={(DOMAIN, self.coordinator.lvr_shadow_name)},
+            name=f"{self.coordinator.hub_name} AC",
+            manufacturer="Milieu Labs",
+            model="LVR",
+        )
+        hub_device_id = self.coordinator.hub_device_id
+        if hub_device_id:
+            info["via_device_id"] = hub_device_id
+        return info
 
     @property
     def _zone(self) -> dict:
@@ -299,19 +304,25 @@ class MilieuACMainClimate(CoordinatorEntity, ClimateEntity):
                 f"{DOMAIN}_{coordinator.lvr_shadow_name}_main_climate",
             )
         )
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, coordinator.lvr_shadow_name)},
-            name=f"{coordinator.hub_name} AC",
-            manufacturer="Milieu Labs",
-            model="LVR",
-            via_device=(DOMAIN, coordinator.hub_shadow_name),
-        )
         # Remembers the last non-OFF mode so toggle can restore it
         self._last_hvac_mode: HVACMode = HVACMode.HEAT_COOL
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        info = DeviceInfo(
+            identifiers={(DOMAIN, self.coordinator.lvr_shadow_name)},
+            name=f"{self.coordinator.hub_name} AC",
+            manufacturer="Milieu Labs",
+            model="LVR",
+        )
+        hub_device_id = self.coordinator.hub_device_id
+        if hub_device_id:
+            info["via_device_id"] = hub_device_id
+        return info
 
     @property
     def _user(self) -> dict:

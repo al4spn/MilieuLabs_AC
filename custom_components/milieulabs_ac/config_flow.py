@@ -9,6 +9,7 @@ from typing import Any
 
 from homeassistant import config_entries
 from homeassistant.data_entry_flow import FlowResult
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import DOMAIN, ClientId, PoolId, API_PROPERTIES_URL
 from pycognito import AWSSRP
@@ -180,9 +181,9 @@ class MilieuLabsACConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         }
         
         try:
-            async with aiohttp.ClientSession() as session:
-                async with async_timeout.timeout(10):
-                    async with session.get(API_PROPERTIES_URL, headers=headers) as response:
+            session = async_get_clientsession(self.hass)
+            async with async_timeout.timeout(10):
+                async with session.get(API_PROPERTIES_URL, headers=headers) as response:
                         if response.status == 200:
                             data = await response.json()
                             _LOGGER.debug("Fetching shadow names from API")

@@ -6,7 +6,6 @@ import boto3
 import uuid as _uuid
 from datetime import datetime, timedelta
 from botocore.exceptions import ClientError
-from homeassistant.components import persistent_notification
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 
@@ -81,6 +80,11 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
         # MQTT internals
         self._mqtt_connection = None
         self._shadow_client = None
+        self._reconnecting: bool = False   # guard against concurrent reconnect coroutines
+        self._shutting_down: bool = False  # set during teardown to suppress post-unload reconnects
+        # Lock protecting shared state dicts written on the MQTT thread and
+        # read on the HA event loop (zone_data, heads_data, user_data, etc.)
+        self._state_lock = asyncio.Lock()
         # Commands awaiting device confirmation, keyed by "scope:id:field"
         # (e.g. "zone:ZONE_1:userSetCoolSetPoint_dC", "user:userMode").
         # See _async_track_command for the verify/retry/revert lifecycle.
@@ -126,6 +130,14 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
         epoch or months-old timestamps for it. ``online`` is the reliable flag.
         """
         return self.lvr_reported.get("online") is not False
+
+    @property
+    def hub_device_id(self) -> str | None:
+        """Return the device registry ID of the hub device, or None if not yet registered."""
+        from homeassistant.helpers import device_registry as dr
+        registry = dr.async_get(self.hass)
+        entry = registry.async_get_device(identifiers={(DOMAIN, self.hub_shadow_name)})
+        return entry.id if entry else None
 
     @property
     def room_temperature(self) -> float | None:
@@ -175,6 +187,7 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
 
     async def async_teardown_mqtt(self) -> None:
         """Disconnect MQTT cleanly on unload."""
+        self._shutting_down = True
         if self._mqtt_connection is not None:
             try:
                 await self.hass.async_add_executor_job(self._teardown_mqtt_sync)
@@ -394,11 +407,19 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
         # makes them exit cleanly instead of retrying over a dead connection
         # and firing spurious "Command Not Applied" notifications.
         self._pending_commands.clear()
+        if self._shutting_down:
+            _LOGGER.debug("MQTT interrupted during teardown – suppressing reconnect")
+            return
+        if self._reconnecting:
+            _LOGGER.debug("MQTT reconnect already in progress – ignoring duplicate interrupt")
+            return
+        self._reconnecting = True
         coro = self._async_reconnect_mqtt()
         try:
             asyncio.run_coroutine_threadsafe(coro, self.hass.loop)
         except RuntimeError as err:
             _LOGGER.warning("Could not schedule MQTT reconnect: %s", err)
+            self._reconnecting = False
             coro.close()
 
     def _on_connection_resumed(self, connection, return_code, session_present, **kwargs) -> None:
@@ -418,32 +439,41 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
         import asyncio as _asyncio
 
         delays = [5, 15, 30, 60, 120]
-        for attempt, delay in enumerate(delays, start=1):
-            _LOGGER.info(
-                "MQTT reconnect attempt %d/%d – waiting %d s...",
-                attempt, len(delays), delay,
-            )
-            await _asyncio.sleep(delay)
-            try:
-                await self.async_setup_mqtt()
-                _LOGGER.info("MQTT reconnected successfully (attempt %d)", attempt)
-                return
-            except _TokenExpiredError:
-                _LOGGER.warning(
-                    "Cognito refresh token expired during MQTT reconnect – triggering re-authentication"
+        try:
+            for attempt, delay in enumerate(delays, start=1):
+                if self._shutting_down:
+                    _LOGGER.debug("Reconnect aborted – integration is shutting down")
+                    return
+                _LOGGER.info(
+                    "MQTT reconnect attempt %d/%d – waiting %d s...",
+                    attempt, len(delays), delay,
                 )
-                if self.config_entry is not None:
-                    self.config_entry.async_start_reauth(self.hass)
-                return
-            except Exception as err:
-                _LOGGER.warning(
-                    "MQTT reconnect attempt %d/%d failed: %s",
-                    attempt, len(delays), err,
-                )
+                await _asyncio.sleep(delay)
+                if self._shutting_down:
+                    _LOGGER.debug("Reconnect aborted – integration is shutting down")
+                    return
+                try:
+                    await self.async_setup_mqtt()
+                    _LOGGER.info("MQTT reconnected successfully (attempt %d)", attempt)
+                    return
+                except _TokenExpiredError:
+                    _LOGGER.warning(
+                        "Cognito refresh token expired during MQTT reconnect – triggering re-authentication"
+                    )
+                    if self.config_entry is not None:
+                        self.config_entry.async_start_reauth(self.hass)
+                    return
+                except Exception as err:
+                    _LOGGER.warning(
+                        "MQTT reconnect attempt %d/%d failed: %s",
+                        attempt, len(delays), err,
+                    )
 
-        _LOGGER.error("MQTT reconnect failed after %d attempts – scheduling full integration reload", len(delays))
-        if self.config_entry is not None:
-            self.hass.config_entries.async_schedule_reload(self.config_entry.entry_id)
+            _LOGGER.error("MQTT reconnect failed after %d attempts – scheduling full integration reload", len(delays))
+            if self.config_entry is not None:
+                self.hass.config_entries.async_schedule_reload(self.config_entry.entry_id)
+        finally:
+            self._reconnecting = False
 
     # Shadow callbacks (called from MQTT thread)
 
@@ -480,11 +510,11 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
         the desired payload here confirms the shadow recorded the command and keeps
         local state in sync without waiting for the device to report back.
 
-        Only the `reported` branch here is proof the *device* applied a change –
-        it is the device, not the cloud, that publishes an update carrying
-        `reported`. The `desired`-only branch is just AWS IoT echoing back our
-        own publish, so it must not be treated as command confirmation (see
-        _async_track_command / _confirm_from_reported).
+        When we publish a desired command, AWS IoT immediately echoes it back as
+        update/accepted with only state.desired set. This device does not reliably
+        publish a reported update after applying commands, so we treat this
+        AWS-accepted echo as confirmation — calling _process_zone_state with
+        is_reported=True clears pending command tracking within ~1 second.
         """
         try:
             _LOGGER.debug("Shadow update_accepted callback fired for %s", self.lvr_shadow_name)
@@ -937,21 +967,8 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
             cmd_key = f"{prefix}:{key}"
             pending = self._pending_commands.get(cmd_key)
             if pending is not None and pending["expected_value"] == value:
-                del self._pending_commands[cmd_key]
+                self._pending_commands.pop(cmd_key, None)
                 _LOGGER.debug("Command confirmed by device: %s = %s", cmd_key, value)
-
-    def _notify_command_failed(self, cmd_key: str, message: str) -> None:
-        """Log and surface a command that the device never confirmed applying."""
-        _LOGGER.error("Milieu Labs AC command not applied: %s", message)
-        try:
-            persistent_notification.async_create(
-                self.hass,
-                message,
-                title="Milieu Labs AC – Command Not Applied",
-                notification_id=f"{DOMAIN}_{self.lvr_shadow_name}_{cmd_key}",
-            )
-        except Exception as err:
-            _LOGGER.debug("Could not create persistent notification: %s", err)
 
     def _schedule_verification(self, coro, name: str) -> None:
         """Run a verification coroutine tied to this config entry's lifetime."""
@@ -965,23 +982,18 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
         cmd_key: str,
         expected_value,
         republish,
-        revert,
         description: str,
         attempt: int = 1,
     ) -> None:
-        """Wait for the device to confirm a command; retry once, then revert.
+        """Wait for the device to confirm a command via shadow update/accepted, then retry once.
 
         Args:
             cmd_key:        Unique key for the field being changed, e.g.
                              ``"zone:ZONE_1:userSetCoolSetPoint_dC"``.
-            expected_value: The raw shadow value we expect to see echoed back
-                             in a genuine ``reported`` block.
+            expected_value: The raw shadow value we expect to see echoed back.
             republish:      Zero-arg async callable that re-sends the same
                              desired-state publish.
-            revert:         Zero-arg sync callable that rolls the optimistic
-                             local state for this field back to its prior value.
-            description:    Human-readable summary used in the failure
-                             notification/log if the command is never confirmed.
+            description:    Human-readable label used in debug logs.
         """
         self._command_seq += 1
         token = self._command_seq
@@ -991,10 +1003,10 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
 
         pending = self._pending_commands.get(cmd_key)
         if pending is None or pending["token"] != token:
-            # Confirmed by the device, or superseded by a newer command on
-            # the same field – either way, nothing to do here.
+            # Confirmed (or superseded by a newer command) – nothing to do.
             return
-        del self._pending_commands[cmd_key]
+        # Use pop to avoid KeyError if the MQTT thread confirms between get() and here
+        self._pending_commands.pop(cmd_key, None)
 
         if attempt < COMMAND_MAX_ATTEMPTS:
             _LOGGER.debug(
@@ -1006,7 +1018,7 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
             except Exception as err:
                 _LOGGER.debug("Retry publish failed for %s: %s", cmd_key, err)
             await self._async_track_command(
-                cmd_key, expected_value, republish, revert, description, attempt=attempt + 1,
+                cmd_key, expected_value, republish, description, attempt=attempt + 1,
             )
             return
 
@@ -1067,21 +1079,12 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
             zone_id, key, value_celsius, value_dc,
         )
 
-        def _revert() -> None:
-            raw = self.zone_data.get(zone_id, {}).get("raw", {})
-            if isinstance(raw, dict):
-                if previous_value is None:
-                    raw.pop(key, None)
-                else:
-                    raw[key] = previous_value
-
         zone_name = self.zone_data.get(zone_id, {}).get("name", zone_id)
         self._schedule_verification(
             self._async_track_command(
                 cmd_key=f"zone:{zone_id}:{key}",
                 expected_value=value_dc,
                 republish=_publish,
-                revert=_revert,
                 description=(
                     f"{zone_name}: {key} change to {value_celsius:.1f} °C "
                     f"was not confirmed by the device."
@@ -1149,26 +1152,11 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
         zone_name = self.zone_data.get(zone_id, {}).get("name", zone_id)
 
         for key, value in fields.items():
-            def _make_revert(key=key, prev=previous_values[key]):
-                def _revert() -> None:
-                    raw = self.zone_data.get(zone_id, {}).get("raw", {})
-                    if isinstance(raw, dict):
-                        if prev is None:
-                            raw.pop(key, None)
-                        else:
-                            raw[key] = prev
-                    if key == "state" and zone_id in self.zone_data:
-                        self.zone_data[zone_id]["zone_state"] = (
-                            previous_zone_state if previous_zone_state is not None else "UNKNOWN"
-                        )
-                return _revert
-
             self._schedule_verification(
                 self._async_track_command(
                     cmd_key=f"zone:{zone_id}:{key}",
                     expected_value=value,
                     republish=_publish,
-                    revert=_make_revert(),
                     description=(
                         f"{zone_name}: {key} change to {value} was not confirmed by the device."
                     ),
@@ -1243,22 +1231,11 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
         # (always called alongside this from the climate entity), so it isn't
         # duplicated/raced across two independent revert paths.
         for head_id in heads_payload:
-            def _make_revert(head_id=head_id, prev=previous_modes.get(head_id)):
-                def _revert() -> None:
-                    head = self.heads_data.get(head_id)
-                    if isinstance(head, dict):
-                        if prev is None:
-                            head.pop("userMode", None)
-                        else:
-                            head["userMode"] = prev
-                return _revert
-
             self._schedule_verification(
                 self._async_track_command(
                     cmd_key=f"head:{head_id}:userMode",
                     expected_value=user_mode,
                     republish=_publish,
-                    revert=_make_revert(),
                     description=(
                         f"System mode change to {user_mode} was not confirmed "
                         f"by the device (head {head_id})."
@@ -1310,20 +1287,11 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
         _LOGGER.info("User settings published: %s", fields)
 
         for key, value in fields.items():
-            def _make_revert(key=key, prev=previous_values[key]):
-                def _revert() -> None:
-                    if prev is None:
-                        self.user_data.pop(key, None)
-                    else:
-                        self.user_data[key] = prev
-                return _revert
-
             self._schedule_verification(
                 self._async_track_command(
                     cmd_key=f"user:{key}",
                     expected_value=value,
                     republish=_publish,
-                    revert=_make_revert(),
                     description=(
                         f"System setting '{key}' change to {value} was not "
                         f"confirmed by the device."
