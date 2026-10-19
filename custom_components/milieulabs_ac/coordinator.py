@@ -11,6 +11,11 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 class _TokenExpiredError(Exception):
     """Cognito refresh token has expired – user must re-authenticate."""
+
+
+def _is_socket_timeout(err: Exception) -> bool:
+    """Return True if err is an AWS CRT socket timeout (silent credential rejection)."""
+    return "AWS_IO_SOCKET_TIMEOUT" in str(err)
 from homeassistant.core import HomeAssistant
 from .const import (
     DOMAIN,
@@ -184,6 +189,35 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
             if self.config_entry is not None:
                 self.config_entry.async_start_reauth(self.hass)
         except Exception as err:
+            # A socket timeout from the MQTT broker can mean the AWS SigV4
+            # credentials were rejected silently (expired IoT temp creds). Clear
+            # the partially-initialised connection and retry once with a full
+            # Cognito + credential refresh before giving up.
+            if _is_socket_timeout(err) and self._mqtt_connection is not None:
+                _LOGGER.warning(
+                    "MQTT connect timed out – retrying once with fresh credentials"
+                )
+                self._mqtt_connection = None
+                self._shadow_client = None
+                try:
+                    await self.hass.async_add_executor_job(self._setup_mqtt_sync)
+                    _LOGGER.info(
+                        "AWS IoT MQTT connected on retry – subscribed to LVR shadow: %s",
+                        self.lvr_shadow_name,
+                    )
+                    return
+                except _TokenExpiredError:
+                    _LOGGER.warning(
+                        "Cognito refresh token expired on retry – triggering re-authentication flow"
+                    )
+                    if self.config_entry is not None:
+                        self.config_entry.async_start_reauth(self.hass)
+                    return
+                except Exception as retry_err:
+                    _LOGGER.error(
+                        "Failed to start MQTT for zone temperatures: %s", retry_err, exc_info=True
+                    )
+                    raise
             _LOGGER.error("Failed to start MQTT for zone temperatures: %s", err, exc_info=True)
             raise
 
