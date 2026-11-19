@@ -247,12 +247,42 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
         )
         return cred_resp["Credentials"]
 
+    @staticmethod
+    def _id_token_expires_in(id_token: str) -> float:
+        """Return seconds until the JWT id_token expires (negative if already expired)."""
+        import base64
+        import json as _json
+        import time
+
+        try:
+            # JWT is header.payload.signature — decode payload (no sig verification needed)
+            payload_b64 = id_token.split(".")[1]
+            # Add padding so base64 doesn't choke
+            payload_b64 += "=" * (-len(payload_b64) % 4)
+            payload = _json.loads(base64.urlsafe_b64decode(payload_b64))
+            return float(payload["exp"]) - time.time()
+        except Exception:
+            return -1.0  # treat as expired on any parse failure
+
     def _refresh_id_token_if_needed_sync(self) -> None:
         """Use the Cognito refresh token to obtain a fresh id_token.
 
         Called synchronously from the executor thread just before the IoT
         credential exchange so the id_token is always current.
+
+        If the current id_token is still valid for more than TOKEN_REFRESH_MARGIN_S
+        seconds, the Cognito call is skipped — this lets the integration survive
+        a temporary Cognito outage as long as the existing token hasn't expired.
         """
+        TOKEN_REFRESH_MARGIN_S = 300  # refresh if less than 5 min remaining
+
+        remaining = self._id_token_expires_in(self.id_token) if self.id_token else -1.0
+        if remaining > TOKEN_REFRESH_MARGIN_S:
+            _LOGGER.debug(
+                "Cognito id_token still valid for %.0f s – skipping refresh", remaining
+            )
+            return
+
         try:
             client = boto3.client("cognito-idp", region_name="us-east-1")
             response = client.initiate_auth(
@@ -278,6 +308,19 @@ class MilieulabsacCoordinator(DataUpdateCoordinator):
                 )
                 raise _TokenExpiredError from err
             _LOGGER.error("Failed to refresh Cognito id_token: %s", err)
+            raise
+        except Exception as err:
+            if remaining > 0:
+                # Cognito unreachable but id_token still valid — proceed and log a warning
+                _LOGGER.warning(
+                    "Cognito unreachable (%.0f s until id_token expires) – using existing token: %s",
+                    remaining, err,
+                )
+                return
+            # Token already expired and Cognito is unreachable — nothing we can do
+            _LOGGER.error(
+                "Cognito unreachable and id_token has expired – cannot refresh: %s", err
+            )
             raise
 
     def _persist_tokens(self, refresh_token_rotated: bool) -> None:
