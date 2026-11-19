@@ -94,7 +94,7 @@ class MilieuACZoneClimate(CoordinatorEntity, ClimateEntity):
     - target_temperature_high  - heat setpoint (autoRangeEndSetPoint_dC)
     """
 
-    _attr_temperature_unit = UnitOfTemperature.CELSIUS
+    _attr_native_temperature_unit = UnitOfTemperature.CELSIUS
     _attr_hvac_modes = [HVACMode.OFF, HVACMode.AUTO]
     _attr_target_temperature_step = 0.5
     _attr_min_temp = 16.0
@@ -171,7 +171,7 @@ class MilieuACZoneClimate(CoordinatorEntity, ClimateEntity):
         )
 
     @property
-    def current_temperature(self) -> float | None:
+    def native_current_temperature(self) -> float | None:
         return self._zone.get("temperature")
 
     @property
@@ -183,7 +183,7 @@ class MilieuACZoneClimate(CoordinatorEntity, ClimateEntity):
         return HVACMode.AUTO
 
     @property
-    def target_temperature(self) -> float | None:
+    def native_target_temperature(self) -> float | None:
         """Single setpoint used when system is in HEAT, COOL, or DRY mode."""
         mode = self._system_mode
         if mode == "USER_HEATING":
@@ -197,7 +197,7 @@ class MilieuACZoneClimate(CoordinatorEntity, ClimateEntity):
         return round(val / 10.0, 1) if val is not None else None
 
     @property
-    def target_temperature_low(self) -> float | None:
+    def native_target_temperature_low(self) -> float | None:
         """Cool setpoint for range (HEAT_COOL / AUTO) modes – uses autoRangeStartSetPoint_dC."""
         if self._system_mode in ("USER_HEATING", "USER_COOLING", "USER_DRY", "USER_FAN_ONLY", ""):
             return None
@@ -205,7 +205,7 @@ class MilieuACZoneClimate(CoordinatorEntity, ClimateEntity):
         return round(val / 10.0, 1) if val is not None else None
 
     @property
-    def target_temperature_high(self) -> float | None:
+    def native_target_temperature_high(self) -> float | None:
         """Heat setpoint for range (HEAT_COOL / AUTO) modes – uses autoRangeEndSetPoint_dC."""
         if self._system_mode in ("USER_HEATING", "USER_COOLING", "USER_DRY", "USER_FAN_ONLY", ""):
             return None
@@ -288,7 +288,7 @@ class MilieuACMainClimate(CoordinatorEntity, ClimateEntity):
     - current_temperature     – main hub sensor (coordinator.data)
     """
 
-    _attr_temperature_unit = UnitOfTemperature.CELSIUS
+    _attr_native_temperature_unit = UnitOfTemperature.CELSIUS
     _attr_hvac_modes = _ALL_HVAC_MODES
     _attr_target_temperature_step = 0.5
     _attr_min_temp = 16.0
@@ -369,7 +369,7 @@ class MilieuACMainClimate(CoordinatorEntity, ClimateEntity):
         return bool(self.coordinator.user_data) and self.coordinator.lvr_online
 
     @property
-    def current_temperature(self) -> float | None:
+    def native_current_temperature(self) -> float | None:
         """Return the room temperature for this hub.
 
         ``coordinator.data`` is always empty -- this integration is push-only
@@ -383,7 +383,7 @@ class MilieuACMainClimate(CoordinatorEntity, ClimateEntity):
         return _USER_MODE_TO_HVAC.get(self._user.get("userMode", ""), HVACMode.OFF)
 
     @property
-    def target_temperature(self) -> float | None:
+    def native_target_temperature(self) -> float | None:
         """Single setpoint for HEAT, COOL, or DRY modes."""
         mode = self._user_mode
         if mode == "USER_HEATING":
@@ -397,7 +397,7 @@ class MilieuACMainClimate(CoordinatorEntity, ClimateEntity):
         return round(val / 10.0, 1) if val is not None else None
 
     @property
-    def target_temperature_low(self) -> float | None:
+    def native_target_temperature_low(self) -> float | None:
         """Cool setpoint for range (HEAT_COOL / AUTO) modes – autoRangeStartSetPoint_dC."""
         if self._user_mode in ("USER_HEATING", "USER_COOLING", "USER_DRY", "USER_FAN_ONLY", ""):
             return None
@@ -405,7 +405,7 @@ class MilieuACMainClimate(CoordinatorEntity, ClimateEntity):
         return round(val / 10.0, 1) if val is not None else None
 
     @property
-    def target_temperature_high(self) -> float | None:
+    def native_target_temperature_high(self) -> float | None:
         """Heat setpoint for range (HEAT_COOL / AUTO) modes – autoRangeEndSetPoint_dC."""
         if self._user_mode in ("USER_HEATING", "USER_COOLING", "USER_DRY", "USER_FAN_ONLY", ""):
             return None
